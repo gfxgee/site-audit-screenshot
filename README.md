@@ -88,7 +88,23 @@ Repository
 
 Create a secret named `TEAMS_WEBHOOK_URL` and paste the existing Power Automate webhook URL as its value. Do not add the URL to source files or workflow YAML.
 
-Only `REVIEW` and `BROKEN` sites receive individual issue payloads. One aggregate summary is sent after all sites finish. Teams delivery failures are logged without exposing the webhook and do not stop the audit. `screenshotPath` is only an artifact-relative reference, not a public URL.
+Only `REVIEW` and `BROKEN` sites receive individual issue payloads. One aggregate summary is sent after all sites finish. Teams delivery failures are logged without exposing the webhook and do not stop the audit.
+
+Each issue payload contains a human-readable `websiteName`, status and URL fields, HTTP/load information, issue text and counts, a preformatted `detailsText`, and the screenshot as `screenshotContentBase64`. The original `screenshotPath` is retained only as an artifact-relative reference; it is not a public URL.
+
+### Display screenshots in the Teams card
+
+An Adaptive Card image requires an accessible image URL. The GitHub runner path cannot be used directly. In the Power Automate `type = issue` branch:
+
+1. Add **Create file** using OneDrive for Business or SharePoint.
+2. Set **File Name** to `triggerBody()?['screenshotFileName']`.
+3. Set **File Content** with the expression `base64ToBinary(triggerBody()?['screenshotContentBase64'])`.
+4. Create an organization-accessible sharing link for that file.
+5. Add an `Action.OpenUrl` button such as **Open full screenshot** using that sharing link.
+
+For an inline Adaptive Card `Image`, use a direct HTTPS URL that returns the image bytes and is accessible to the Teams client. Do not use a normal sharing link if it redirects: Teams does not support redirects for card image URLs. An access-controlled SharePoint direct image URL can work if it is resolvable by every intended Teams viewer; otherwise publish the image to an approved image host. The audit deliberately does not make screenshots public automatically.
+
+The issue-card title can use `triggerBody()?['title']`, which produces values such as `REVIEW: digitalfeet.com`. Use `triggerBody()?['detailsText']` for all core diagnostics in one text block. The summary card can use `triggerBody()?['summaryText']` and `triggerBody()?['websiteStatusText']`; the payload also includes a structured `websites` array with the name, status, URL, HTTP status, load time, and issues for every audited site.
 
 ## GitHub Actions
 
