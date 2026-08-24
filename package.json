@@ -1,0 +1,17 @@
+{
+  "name": "site-audit-screenshot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated Playwright homepage health checks and full-page screenshots",
+  "type": "module",
+  "scripts": {
+    "check": "node src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "playwright": "1.62.1"
+  }
+}

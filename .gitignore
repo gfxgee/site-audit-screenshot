@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+
+# Generated audit output is uploaded by GitHub Actions instead of committed.
+artifacts/results.json
+artifacts/results.csv
+artifacts/screenshots/*.png
+artifacts/screenshots/*.jpg
