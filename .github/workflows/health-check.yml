@@ -1,0 +1,95 @@
+name: Website Homepage Audit
+
+on:
+  # Manual runs: Actions -> Website Homepage Audit -> Run workflow
+  workflow_dispatch:
+
+  # Daily run. GitHub cron is ALWAYS UTC.
+  #   00:00 UTC = 08:00 Philippine time (UTC+8)
+  # To change the time, subtract 8 hours from the Philippine time you want:
+  #   06:00 PHT -> '0 22 * * *'   |   12:00 PHT -> '0 4 * * *'
+  #   18:00 PHT -> '0 10 * * *'   |   22:00 PHT -> '0 14 * * *'
+  schedule:
+    - cron: '0 0 * * *'
+
+# A scheduled run and a manual run must never fight over the same artifacts.
+concurrency:
+  group: homepage-audit
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Audit homepages
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-
+
+      # Installs Chromium plus the Linux system libraries it needs. Skips the
+      # download when the cache above already provided the browser.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run homepage audit
+        # The webhook is exposed only to this step and is never echoed.
+        # A missing secret is fine: the audit runs and Teams posting is skipped.
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: npm run check
+
+      - name: Write run summary
+        if: always()
+        run: |
+          if [ -f artifacts/results.json ]; then
+            node -e '
+              const { summary, results } = require("./artifacts/results.json");
+              const rows = results.map(r =>
+                `| ${r.status} | ${r.url} | ${r.httpStatus ?? "-"} | ${r.loadTimeMs ?? "-"} | ${(r.issues || []).join("<br>").replace(/\|/g, "\\|") || "-"} |`
+              );
+              const out = [
+                `## Homepage audit: ${summary.passed} PASS / ${summary.review} REVIEW / ${summary.broken} BROKEN`,
+                "",
+                "| Status | URL | HTTP | Load (ms) | Issues |",
+                "| --- | --- | --- | --- | --- |",
+                ...rows,
+                "",
+                "Full-page screenshots are in the **website-audit-results** artifact below.",
+              ].join("\n");
+              require("fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, out + "\n");
+            '
+          else
+            echo "No results.json was produced - see the audit step logs." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Uploaded even when sites are REVIEW/BROKEN, and even if the audit step
+      # failed outright, so screenshots are always available for triage.
+      - name: Upload screenshots and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-audit-results
+          path: artifacts/
+          retention-days: 14
+          if-no-files-found: warn

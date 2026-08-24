@@ -1,0 +1,4 @@
+# Keep LF in the repository so the Linux GitHub Actions runner sees LF.
+* text=auto eol=lf
+*.png binary
+*.ico binary

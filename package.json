@@ -1,0 +1,24 @@
+{
+  "name": "site-audit-screenshot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated homepage rendering audit with full-page Playwright screenshots and Microsoft Teams alerts.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node src/index.js",
+    "install:browser": "playwright install chromium"
+  },
+  "keywords": [
+    "playwright",
+    "screenshot",
+    "monitoring",
+    "audit"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.62.1"
+  }
+}

@@ -1,0 +1,24 @@
+# dependencies
+node_modules/
+
+# secrets / local env
+.env
+.env.local
+.env.*.local
+
+# generated audit output (uploaded as GitHub Actions artifacts instead of committed)
+artifacts/*
+!artifacts/screenshots/
+artifacts/screenshots/*
+!artifacts/screenshots/.gitkeep
+
+# logs / os noise
+npm-debug.log*
+yarn-error.log*
+*.log
+.DS_Store
+Thumbs.db
+
+# playwright local state
+test-results/
+playwright-report/
