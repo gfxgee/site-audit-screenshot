@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { classify, isIgnoredUrl } from './classifier.js';
+import { classify, isFirstParty, isIgnoredUrl, scoreBlankPage } from './classifier.js';
 import { errorMessage, limitPush, relativePath, withTimeout } from './utils.js';
 
 /** Sibling .jpg path for a screenshot's .png path. */
@@ -65,6 +65,9 @@ async function inspectPage(page, config) {
     const visibleText = body && isVisible(body) ? (body.innerText || '').replace(/\s+/g, ' ').trim() : '';
     const meaningfulSelector = 'main, header, footer, nav, section, article, form, h1, h2, video, canvas, img';
     const meaningfulElements = [...document.querySelectorAll(meaningfulSelector)].filter(isVisible);
+    const majorContainerCount = document.querySelectorAll(
+      'main, header, footer, [role="main"], #main, #content, .content, .container',
+    ).length;
     const images = [...document.images];
     const brokenImages = images
       .filter((image) => {
@@ -108,9 +111,6 @@ async function inspectPage(page, config) {
 
     const height = Math.max(body?.scrollHeight ?? 0, root.scrollHeight);
     const bodyVisible = Boolean(body && isVisible(body));
-    const blankPageDetected = !bodyVisible || (
-      visibleText.length < 40 && meaningfulElements.length < 2 && images.length === 0 && height < window.innerHeight * 1.2
-    );
     const suspiciousCollapsed = bodyVisible && height < 250 && visibleText.length < 120 && meaningfulElements.length < 3;
 
     return {
@@ -124,8 +124,9 @@ async function inspectPage(page, config) {
       imageCount: images.length,
       elementCount: candidates.length,
       inspectionTruncated,
+      innerHeight: window.innerHeight,
+      majorContainerCount,
       brokenImages,
-      blankPageDetected,
       layout: {
         overflowPixels,
         horizontalOverflow: overflowPixels > overflowTolerance && (
@@ -148,6 +149,22 @@ function detectSuspiciousText(inspection, httpStatus) {
   const genericFailure = /\bsomething went wrong\b/i.test(haystack) && (inspection.visibleTextLength < 1_500 || httpStatus >= 400);
   if (genericFailure) matches.push('something went wrong');
   return matches;
+}
+
+/**
+ * Walk back through the main document's redirect chain.
+ * Playwright links each redirect via request.redirectedFrom().
+ */
+function redirectChainOf(response) {
+  const chain = [];
+  let request = response.request().redirectedFrom();
+  let guard = 0;
+  while (request && guard < 30) {
+    chain.unshift(request.url());
+    request = request.redirectedFrom();
+    guard += 1;
+  }
+  return chain;
 }
 
 function baseResult(url, screenshotPath, projectRoot) {
@@ -174,6 +191,14 @@ function baseResult(url, screenshotPath, projectRoot) {
     emailImageError: null,
     lazyScrollError: null,
     blankPageDetected: false,
+    thinPageDetected: false,
+    blankSignals: [],
+    blankScore: 0,
+    redirectedTo: null,
+    redirectChain: [],
+    redirectCount: 0,
+    redirectLoop: false,
+    redirectedOffDomain: false,
     errorPageDetected: false,
     layout: { overflowPixels: 0, overflowElements: [], suspiciousCollapsed: false },
     pageMetrics: null,
@@ -223,12 +248,26 @@ export async function checkSite(browser, url, screenshotPath, config) {
     } catch (error) {
       result.navigationError = errorMessage(error);
       result.timedOut = /timeout/i.test(result.navigationError);
+      // Chromium gives up after 20 hops and reports this. It is the exact
+      // failure a looping homepage produces.
+      result.redirectLoop = /ERR_TOO_MANY_REDIRECTS/i.test(result.navigationError);
       result.sslError = /(?:certificate|ERR_CERT|SSL)/i.test(result.navigationError);
       result.dnsError = /(?:ERR_NAME_NOT_RESOLVED|ENOTFOUND|DNS)/i.test(result.navigationError);
     }
 
     result.loadTimeMs = Date.now() - startedAt;
     result.finalUrl = page.url() === 'about:blank' ? null : page.url();
+
+    if (mainResponse) {
+      result.redirectChain = redirectChainOf(mainResponse);
+      result.redirectCount = result.redirectChain.length;
+      if (result.finalUrl && result.finalUrl !== result.url) {
+        result.redirectedTo = result.finalUrl;
+        // Landing on an unrelated domain means the homepage is gone: an
+        // expired domain, a parking page, or a misconfigured redirect.
+        result.redirectedOffDomain = !isFirstParty(result.finalUrl, result.url);
+      }
+    }
 
     if (!result.navigationError) {
       await page.waitForTimeout(config.postLoadWait);
@@ -247,7 +286,6 @@ export async function checkSite(browser, url, screenshotPath, config) {
       result.brokenImages = inspection.brokenImages.slice(0, config.maxFailedRequests);
       result.horizontalOverflow = inspection.layout.horizontalOverflow;
       result.layout = inspection.layout;
-      result.blankPageDetected = inspection.blankPageDetected;
       result.pageMetrics = {
         title: inspection.title,
         visibleTextLength: inspection.visibleTextLength,
@@ -258,7 +296,17 @@ export async function checkSite(browser, url, screenshotPath, config) {
         imageCount: inspection.imageCount,
         elementCount: inspection.elementCount,
         inspectionTruncated: inspection.inspectionTruncated,
+        innerHeight: inspection.innerHeight,
+        majorContainerCount: inspection.majorContainerCount,
       };
+
+      // Blank/partial-render scoring lives in the classifier so every
+      // PASS/REVIEW/BROKEN rule stays in one editable place.
+      const blankness = scoreBlankPage(result.pageMetrics);
+      result.blankPageDetected = blankness.blank;
+      result.thinPageDetected = blankness.thin;
+      result.blankSignals = blankness.signals;
+      result.blankScore = blankness.score;
       result.suspiciousText = detectSuspiciousText(inspection, result.httpStatus);
       result.errorPageDetected = result.suspiciousText.length > 0;
     } catch (error) {

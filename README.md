@@ -23,11 +23,70 @@ After the initial render, the page is scrolled gradually to trigger lazy-loaded 
 
 Results are classified as:
 
-- `PASS`: the homepage loaded without a significant detected issue.
-- `REVIEW`: the homepage loaded but has a meaningful broken image, first-party request failure, script/console error, screenshot problem, or suspicious layout condition.
-- `BROKEN`: navigation failed, the main document returned 404 or 5xx, an obvious error page was detected, or the page is effectively blank.
+- `PASS`: the homepage loaded and rendered without a visitor-visible problem.
+- `REVIEW`: it loaded, but something a visitor could notice looks wrong.
+- `BROKEN`: a visitor cannot use this homepage.
 
-Ambiguous partial failures are intentionally classified as `REVIEW`, not `BROKEN`.
+### BROKEN
+
+- navigation failed, timed out, or hit a DNS/TLS error
+- the main document returned `404` or `5xx`
+- a server or application error page was detected
+- **the homepage is blank or barely rendered** (weighted scoring, below)
+- **a redirect loop** — `ERR_TOO_MANY_REDIRECTS`, the homepage never resolves
+- **the homepage redirects off-domain** — an expired domain or parking page,
+  which is broken even though the final response is `200`
+
+### REVIEW
+
+- a meaningful broken image, or a failed first-party script/stylesheet/image
+- an unusually long redirect chain (more than 3 hops)
+- major horizontal overflow, or a suspiciously collapsed layout
+- the screenshot could not be captured
+- a `4xx` other than `404`
+
+### Recorded but never classified
+
+These are written to `results.json` and shown in the email as context, but they
+do **not** change the status:
+
+| Signal | Why |
+| --- | --- |
+| JavaScript errors | Near-universal on real marketing sites and poorly correlated with what a visitor sees. `infosoft.no` throws `jQuery is not defined` and renders perfectly. |
+| Console errors | Same, plus browser privacy and policy noise. |
+| Failed font requests | A font that fails falls back to a system font. `marstrand.no` references nine Segoe UI files its theme never shipped; the page looks fine. |
+| Failed `fetch`/`xhr` | Background calls with no rendered output. |
+| Any third-party failure | Analytics, ads, consent tooling, embedded widgets, telemetry, favicons. |
+
+Together these accounted for **every** flag across a 13-site run of healthy
+sites: 9 REVIEW alerts, none of which a visitor would have noticed. The
+full-page screenshot is the evidence that matters, and it is attached to every
+report.
+
+### Blank and partial-render scoring
+
+A single hard threshold is too blunt — requiring almost no text *and* almost no
+elements *and* no images *and* a short page means a homepage rendering only its
+header slips through. Weak signals are weighted instead (see `scoreBlankPage`
+in [`src/classifier.js`](src/classifier.js)):
+
+| Signal | Points |
+| --- | ---: |
+| body not visible | 3 |
+| under 40 characters of visible text | 2 |
+| under 250 characters of visible text | 1 |
+| fewer than 3 content elements | 2 |
+| fewer than 10 content elements | 1 |
+| page shorter than 60% of the viewport | 1 |
+| no images | 1 |
+| no `main`/`header`/`footer` container | 1 |
+| no page title | 1 |
+
+A score of 5 or more, an invisible body, or almost no text *and* almost no
+elements is `BROKEN`. A score of exactly 4 is `REVIEW`. A deliberately minimal
+landing page scores 2 and stays `PASS`.
+
+Ambiguous partial failures are intentionally `REVIEW`, not `BROKEN`.
 
 ## Local setup
 
