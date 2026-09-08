@@ -45,7 +45,7 @@ Run the deterministic classification tests with:
 npm test
 ```
 
-The audit works without Microsoft Teams configured. In that case it still creates every screenshot and report, logs one warning, and skips notifications.
+The audit works without email configured. In that case it still creates every screenshot and report, logs one warning, and skips sending.
 
 ## Configuration
 
@@ -63,7 +63,14 @@ All configuration is optional and supplied through environment variables:
 | `MAX_FAILED_REQUESTS` | `30` | Maximum stored failed/HTTP-error requests per site |
 | `SCROLL_DELAY` | `250` | Delay between lazy-loading scroll steps in milliseconds |
 | `SCROLL_MAX_STEPS` | `100` | Safety limit for lazy-loading scroll steps |
-| `TEAMS_TIMEOUT` | `10000` | Teams webhook request timeout in milliseconds |
+| `RESEND_API_KEY` | _(unset)_ | Resend API key. **Secret** — without it the email is skipped |
+| `EMAIL_TO` | _(unset)_ | Recipients, comma separated. Without it the email is skipped |
+| `EMAIL_FROM` | `onboarding@resend.dev` | Sender. Needs a Resend-verified domain to send anywhere else |
+| `EMAIL_SUBJECT_PREFIX` | `Homepage audit` | Leading text of the subject line |
+| `EMAIL_TIMEOUT` | `60000` | Resend request timeout in milliseconds |
+| `EMAIL_JPEG_QUALITY` | `70` | Quality of the JPEG screenshot copies sent by email (1-100) |
+| `EMAIL_ATTACHMENT_BUDGET_MB` | `12` | Attachment cap before base64 overhead; healthy sites are dropped first |
+| `EMAIL_INLINE_SCREENSHOTS` | `all` | Inline embedding: `all`, `issues` or `none`. Everything is attached regardless |
 
 For PowerShell, a one-run override looks like:
 
@@ -72,9 +79,31 @@ $env:CONCURRENCY = '2'
 npm run check
 ```
 
-## Microsoft Teams setup
+## Email report (Resend)
 
-The existing Power Automate webhook must be saved as a GitHub Actions repository secret. The URL is read only from `process.env.TEAMS_WEBHOOK_URL`; it is never hardcoded or logged.
+After every run the audit sends **one digest email** through the Resend API containing:
+
+- a summary line (`N sites checked in Xs — P PASS, R REVIEW, B BROKEN`)
+- a report of every `REVIEW`/`BROKEN` site with each detected issue
+- a table of all monitored sites
+- the **full-page screenshot of every site**, attached as JPEG and embedded inline
+
+Screenshots are attached as JPEG rather than PNG purely for size: the PNG set is
+~14MB for 8 sites, which most mailboxes reject once base64-encoded, while the
+JPEG set is ~4MB. Full-resolution PNGs remain in the workflow artifact.
+
+If the total would still exceed `EMAIL_ATTACHMENT_BUDGET_MB`, screenshots are
+dropped in `PASS` → `REVIEW` → `BROKEN` priority order, so a size cap can never
+hide the sites that matter. Anything omitted is listed at the bottom of the email.
+
+Note that a full-page screenshot renders roughly 2,700px tall, so a 13-site email
+is very long to scroll. Set `EMAIL_INLINE_SCREENSHOTS=issues` to embed only the
+problem sites (everything stays attached either way).
+
+### Setup
+
+`RESEND_API_KEY` is read only from the environment — never hardcoded, never
+logged, never written to a report.
 
 In GitHub, open:
 
@@ -83,28 +112,27 @@ Repository
 → Settings
 → Secrets and variables
 → Actions
-→ New repository secret
 ```
 
-Create a secret named `TEAMS_WEBHOOK_URL` and paste the existing Power Automate webhook URL as its value. Do not add the URL to source files or workflow YAML.
+Add two **secrets**:
 
-Only `REVIEW` and `BROKEN` sites receive individual issue payloads. One aggregate summary is sent after all sites finish. Teams delivery failures are logged without exposing the webhook and do not stop the audit.
+| Name | Value |
+| --- | --- |
+| `RESEND_API_KEY` | Your Resend API key (`re_...`) |
+| `EMAIL_TO` | Recipient address, or several separated by commas |
 
-Each issue payload contains a human-readable `websiteName`, status and URL fields, HTTP/load information, issue text and counts, a preformatted `detailsText`, and the screenshot as `screenshotContentBase64`. The original `screenshotPath` is retained only as an artifact-relative reference; it is not a public URL.
+Sender addresses work in two stages:
 
-### Display screenshots in the Teams card
+- **Without a verified domain**, leave `EMAIL_FROM` unset. It defaults to
+  Resend's `onboarding@resend.dev` test sender, which can only deliver to the
+  email address that owns the Resend account.
+- **With a verified domain**, add a repository **variable** named `EMAIL_FROM`
+  (e.g. `audit@yourdomain.com`) to send to any recipient. Verify the domain
+  under Domains in the Resend dashboard and add the DNS records it lists.
 
-An Adaptive Card image requires an accessible image URL. The GitHub runner path cannot be used directly. In the Power Automate `type = issue` branch:
-
-1. Add **Create file** using OneDrive for Business or SharePoint.
-2. Set **File Name** to `triggerBody()?['screenshotFileName']`.
-3. Set **File Content** with the expression `base64ToBinary(triggerBody()?['screenshotContentBase64'])`.
-4. Create an organization-accessible sharing link for that file.
-5. Add an `Action.OpenUrl` button such as **Open full screenshot** using that sharing link.
-
-For an inline Adaptive Card `Image`, use a direct HTTPS URL that returns the image bytes and is accessible to the Teams client. Do not use a normal sharing link if it redirects: Teams does not support redirects for card image URLs. An access-controlled SharePoint direct image URL can work if it is resolvable by every intended Teams viewer; otherwise publish the image to an approved image host. The audit deliberately does not make screenshots public automatically.
-
-The issue-card title can use `triggerBody()?['title']`, which produces values such as `REVIEW: digitalfeet.com`. Use `triggerBody()?['detailsText']` for all core diagnostics in one text block. The summary card can use `triggerBody()?['summaryText']` and `triggerBody()?['websiteStatusText']`; the payload also includes a structured `websites` array with the name, status, URL, HTTP status, load time, and issues for every audited site.
+Delivery failures are logged without exposing the API key and never stop the
+audit. `screenshotPath` in the reports is an artifact-relative reference, not a
+public URL.
 
 ## GitHub Actions
 
@@ -137,6 +165,9 @@ artifacts/results.csv
 artifacts/screenshots/
 ```
 
+`artifacts/screenshots/` holds a full-resolution `.png` per site plus the
+smaller `.jpg` copy used for email delivery.
+
 The reports are written even when one or more monitored websites are `REVIEW` or `BROKEN`. These classifications are monitoring outcomes and do not fail the workflow. Only a genuine execution failure—such as Chromium failing to launch or reports being impossible to write—fails the job.
 
 The workflow's artifact upload uses `if: always()` and retains results for 14 days. To download them, open the completed workflow run in GitHub Actions and select the `website-audit-results-<run number>` artifact near the bottom of the run summary.
@@ -150,11 +181,12 @@ Generated local screenshots and reports are ignored by Git, while the artifact d
 src/index.js                        Orchestration, concurrency, reports
 src/checker.js                      Playwright navigation and page inspection
 src/classifier.js                   PASS/REVIEW/BROKEN rules and noise filters
-src/teams.js                        Power Automate webhook delivery
+src/email.js                        Resend email report delivery
 src/csv.js                          Site input and CSV report generation
 src/config.js                       Environment configuration
 src/utils.js                        Shared utilities
 test/classifier.test.js             Classification regression tests
+test/email.test.js                  Email report and attachment budget tests
 sites.csv                           Monitored homepage URLs
 artifacts/                          Generated reports and screenshots
 ```

@@ -33,7 +33,13 @@ jobs:
       - name: Audit homepages
         run: npm run check
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          # Secrets are exposed only to this step and are never echoed.
+          # A missing key skips the email; the audit and artifacts still run.
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          # Optional: set an EMAIL_FROM variable once a domain is verified in
+          # Resend. Defaults to Resend's onboarding@resend.dev test sender.
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
 
       - name: Upload screenshots and reports
         if: always()

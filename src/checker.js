@@ -2,6 +2,11 @@ import path from 'node:path';
 import { classify, isIgnoredUrl } from './classifier.js';
 import { errorMessage, limitPush, relativePath } from './utils.js';
 
+/** Sibling .jpg path for a screenshot's .png path. */
+export function emailImagePath(screenshotPath) {
+  return screenshotPath.replace(/\.png$/i, '.jpg');
+}
+
 const ERROR_PAGE_PATTERNS = [
   /\binternal server error\b/i,
   /\bbad gateway\b/i,
@@ -145,6 +150,8 @@ function baseResult(url, screenshotPath, projectRoot) {
     issues: [],
     screenshotPath: relativePath(projectRoot, screenshotPath),
     screenshotError: null,
+    emailImagePath: null,
+    emailImageError: null,
     blankPageDetected: false,
     errorPageDetected: false,
     layout: { overflowPixels: 0, overflowElements: [], suspiciousCollapsed: false },
@@ -234,6 +241,21 @@ export async function checkSite(browser, url, screenshotPath, config) {
       await page.screenshot({ path: screenshotPath, fullPage: true });
     } catch (error) {
       result.screenshotError = errorMessage(error);
+    }
+
+    // A JPEG copy of the same full-page view, for email delivery. The PNG
+    // remains the archived artifact; JPEG is roughly 5x smaller, which is what
+    // keeps a full set of screenshots inside mailbox size limits.
+    try {
+      await page.screenshot({
+        path: emailImagePath(screenshotPath),
+        fullPage: true,
+        type: 'jpeg',
+        quality: config.email.jpegQuality,
+      });
+      result.emailImagePath = relativePath(config.projectRoot, emailImagePath(screenshotPath));
+    } catch (error) {
+      result.emailImageError = errorMessage(error);
     }
   } finally {
     await context.close().catch(() => {});
