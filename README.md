@@ -45,7 +45,7 @@ Run the deterministic classification tests with:
 npm test
 ```
 
-Local audits work without email configured: screenshots and reports are saved and a warning explains that email was skipped. GitHub Actions requires email configuration, so missing settings or delivery failures fail the job after saving the artifacts.
+The audit works without email configured. In that case it still creates every screenshot and report, logs one warning, and skips sending.
 
 ## Configuration
 
@@ -63,7 +63,14 @@ All configuration is optional and supplied through environment variables:
 | `MAX_FAILED_REQUESTS` | `30` | Maximum stored failed/HTTP-error requests per site |
 | `SCROLL_DELAY` | `250` | Delay between lazy-loading scroll steps in milliseconds |
 | `SCROLL_MAX_STEPS` | `100` | Safety limit for lazy-loading scroll steps |
-| `EMAIL_MAX_ATTACHMENT_BYTES` | `12582912` | Maximum raw attachment bytes per email; larger runs are split into numbered parts |
+| `RESEND_API_KEY` | _(unset)_ | Resend API key. **Secret** — without it the email is skipped |
+| `EMAIL_TO` | _(unset)_ | Recipients, comma separated. Without it the email is skipped |
+| `EMAIL_FROM` | `onboarding@resend.dev` | Sender. Needs a Resend-verified domain to send anywhere else |
+| `EMAIL_SUBJECT_PREFIX` | `Homepage audit` | Leading text of the subject line |
+| `EMAIL_TIMEOUT` | `60000` | Resend request timeout in milliseconds |
+| `EMAIL_JPEG_QUALITY` | `70` | Quality of the JPEG screenshot copies sent by email (1-100) |
+| `EMAIL_ATTACHMENT_BUDGET_MB` | `12` | Attachment cap before base64 overhead; healthy sites are dropped first |
+| `EMAIL_INLINE_SCREENSHOTS` | `all` | Inline embedding: `all`, `issues` or `none`. Everything is attached regardless |
 
 For PowerShell, a one-run override looks like:
 
@@ -72,29 +79,78 @@ $env:CONCURRENCY = '2'
 npm run check
 ```
 
-## Email setup
+## Email report (Resend)
 
-Each audit emails **gee@digitalfeet.com**, **romeo@digitalfeet.com**, **jason@digitalfeet.com**, and **levi@digitalfeet.com** from **gee@digitalfeet.com**. Teams notifications have been removed.
+After every run the audit sends **one digest email** through the Resend API containing:
 
-The email body lists every website's status, URL, HTTP status, load time, issues, and check timestamp. Attachments include `results.csv`, `results.json`, and every available screenshot, including PASS sites. Missing or failed screenshots are explicitly listed in the body. A failed capture never attaches a stale screenshot from an earlier local run.
+- a summary line (`N sites checked in Xs — P PASS, R REVIEW, B BROKEN`)
+- a report of every `REVIEW`/`BROKEN` site with each detected issue
+- a table of all monitored sites
+- the **full-page screenshot of every site**, attached as JPEG and embedded inline
 
-In GitHub, open **Settings → Secrets and variables → Actions** and add these repository secrets:
+Screenshots are attached as JPEG rather than PNG purely for size: the PNG set is
+~14MB for 8 sites, which most mailboxes reject once base64-encoded, while the
+JPEG set is ~4MB. Full-resolution PNGs remain in the workflow artifact.
 
-| Secret | Value |
+If the total would still exceed `EMAIL_ATTACHMENT_BUDGET_MB`, screenshots are
+dropped in `PASS` → `REVIEW` → `BROKEN` priority order, so a size cap can never
+hide the sites that matter. Anything omitted is listed at the bottom of the email.
+
+Note that a full-page screenshot renders roughly 2,700px tall, so a 13-site email
+is very long to scroll. Set `EMAIL_INLINE_SCREENSHOTS=issues` to embed only the
+problem sites (everything stays attached either way).
+
+### Setup
+
+`RESEND_API_KEY` is read only from the environment — never hardcoded, never
+logged, never written to a report.
+
+In GitHub, open:
+
+```text
+Repository
+→ Settings
+→ Secrets and variables
+→ Actions
+```
+
+Add one **secret** — the API key is the only real secret here:
+
+```text
+Settings → Secrets and variables → Actions → Secrets tab
+```
+
+| Name | Value |
 | --- | --- |
-| `SMTP_HOST` | SMTP hostname supplied by the sender's mail provider |
-| `SMTP_USER` | SMTP username for the authorized sending account |
-| `SMTP_PASS` | Provider-issued SMTP password or app password |
+| `RESEND_API_KEY` | Your Resend API key (`re_...`) |
 
-Set the repository **variable** `SMTP_PORT` to the provider's port (default `587`; `465` is also supported). Port 465 uses TLS immediately; other ports require STARTTLS. Certificate verification remains enabled. The sender is set to `gee@digitalfeet.com` in the workflow. Your provider must authorize sending as this address and support SMTP password/app-password authentication. If the account requires OAuth or SMTP is disabled, the sending integration must be adapted to the provider before enabling delivery. Transport behavior follows the [Nodemailer SMTP documentation](https://nodemailer.com/smtp).
+Then add the addresses as **variables**, on the Variables tab of the same page:
 
-For local runs, supply the same SMTP settings as environment variables. `EMAIL_FROM` defaults to `gee@digitalfeet.com`; `EMAIL_REQUIRED=true` makes missing configuration an error. Never commit credentials. The old `TEAMS_WEBHOOK_URL` secret is no longer used.
+```text
+Settings → Secrets and variables → Actions → Variables tab
+```
 
-The default attachment budget is 12 MiB of raw files per message, allowing room for Base64 encoding overhead. Larger runs are split across numbered emails; the summary appears in each part and each file is attached once across the parts. Provider limits vary. Set `EMAIL_MAX_ATTACHMENT_BYTES` below your provider's message-size limit with room for encoding and body text. If a single file exceeds the budget, sending fails before any part is sent; the full files remain available in GitHub artifacts. Increase the budget only if the provider permits it.
+| Name | Value |
+| --- | --- |
+| `EMAIL_TO` | Recipients, comma separated |
+| `EMAIL_FROM` | Sender on a Resend-verified domain, e.g. `audit@digitalfeet.com` |
 
-Missing required settings, transport failures, and partial recipient rejection fail the workflow while preserving artifacts. Earlier parts may already have been accepted if a later part fails, so rerunning can produce duplicates. SMTP acceptance means the provider accepted the message; it does not confirm inbox delivery.
+Recipients and sender are configuration, not credentials, so variables suit them
+better: a variable stays readable and editable, whereas a secret is write-only —
+you can overwrite it but never read it back, which makes adding one forgotten
+recipient mean retyping the whole list. Actions variables are not published with
+the repository, and the audit logs only the recipient *count*, never the
+addresses. A secret named `EMAIL_TO` still works as a fallback if one exists.
 
-After configuring the sender and deploying the changes, use **Actions → Website Homepage Audit → Run workflow** and confirm all four inboxes receive the attachments.
+`EMAIL_FROM` must be on a domain verified under Domains in the Resend dashboard.
+Until one is, leave it unset: it falls back to Resend's `onboarding@resend.dev`
+test sender, which can only deliver to the address that owns the Resend account.
+The local part does not need to be a real mailbox, though replies to it will
+bounce — use a real address or `noreply@` if that matters.
+
+Delivery failures are logged without exposing the API key and never stop the
+audit. `screenshotPath` in the reports is an artifact-relative reference, not a
+public URL.
 
 ## GitHub Actions
 
@@ -113,9 +169,32 @@ GitHub
 
 ### Scheduled run
 
-The default schedule is daily at `00:00 UTC`, which is `08:00` in the Philippines (`UTC+8`). GitHub Actions cron expressions always use UTC. To change the time, edit the `cron` value in `.github/workflows/health-check.yml`; for example, `0 1 * * *` means 01:00 UTC / 09:00 Philippines time.
+The audit runs daily at **10:00 Philippine time**. GitHub Actions cron is always
+UTC and the Philippines is UTC+8, so the configured expression is:
 
-GitHub may delay scheduled jobs during periods of high load, so the start time is approximate.
+```yaml
+schedule:
+  - cron: '17 2 * * *'   # 02:17 UTC = 10:17 PHT
+```
+
+To change the time, subtract 8 hours from the local time you want:
+
+| Philippine time | cron (UTC) |
+| --- | --- |
+| 06:00 PHT | `'17 22 * * *'` |
+| 08:00 PHT | `'17 0 * * *'` |
+| 10:00 PHT | `'17 2 * * *'` (current) |
+| 12:00 PHT | `'17 4 * * *'` |
+| 18:00 PHT | `'17 10 * * *'` |
+
+The minute is deliberately `17` rather than `0`. GitHub queues scheduled jobs
+and the top of the hour is the most contended slot — while this repository was
+set to `'0 0 * * *'`, every run started roughly four hours late. An off-peak
+minute reduces that queueing.
+
+GitHub still offers no delivery-time guarantee for scheduled workflows, so treat
+the time as approximate. If runs stay persistently late, shift the cron earlier
+by the observed lag to compensate.
 
 ## Results
 
@@ -127,7 +206,10 @@ artifacts/results.csv
 artifacts/screenshots/
 ```
 
-The reports are written even when one or more monitored websites are `REVIEW` or `BROKEN`. These classifications are monitoring outcomes and do not fail the workflow. Execution failures—such as Chromium failing to launch, reports being impossible to write, or required email delivery failing—fail the job.
+`artifacts/screenshots/` holds a full-resolution `.png` per site plus the
+smaller `.jpg` copy used for email delivery.
+
+The reports are written even when one or more monitored websites are `REVIEW` or `BROKEN`. These classifications are monitoring outcomes and do not fail the workflow. Only a genuine execution failure—such as Chromium failing to launch or reports being impossible to write—fails the job.
 
 The workflow's artifact upload uses `if: always()` and retains results for 14 days. To download them, open the completed workflow run in GitHub Actions and select the `website-audit-results-<run number>` artifact near the bottom of the run summary.
 
@@ -140,11 +222,12 @@ Generated local screenshots and reports are ignored by Git, while the artifact d
 src/index.js                        Orchestration, concurrency, reports
 src/checker.js                      Playwright navigation and page inspection
 src/classifier.js                   PASS/REVIEW/BROKEN rules and noise filters
-src/email.js                        SMTP summary and attachment delivery
+src/email.js                        Resend email report delivery
 src/csv.js                          Site input and CSV report generation
 src/config.js                       Environment configuration
 src/utils.js                        Shared utilities
 test/classifier.test.js             Classification regression tests
+test/email.test.js                  Email report and attachment budget tests
 sites.csv                           Monitored homepage URLs
 artifacts/                          Generated reports and screenshots
 ```

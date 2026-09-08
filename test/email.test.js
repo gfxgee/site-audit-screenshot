@@ -3,88 +3,217 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import nodemailer from 'nodemailer';
-import { buildEmailMessages, recipients, sendEmailNotifications } from '../src/email.js';
+import { buildSubject, buildText, collectAttachments, emailInternals, sendEmailReport } from '../src/email.js';
 
-async function fixture(t) {
-  const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'audit-email-'));
-  t.after(() => fs.rm(projectRoot, { recursive: true, force: true }));
-  const artifactsDir = path.join(projectRoot, 'artifacts');
-  const screenshotsDir = path.join(artifactsDir, 'screenshots');
-  await fs.mkdir(screenshotsDir, { recursive: true });
-  await fs.writeFile(path.join(artifactsDir, 'results.csv'), 'url,status\nhttps://example.com/,PASS\n');
-  await fs.writeFile(path.join(artifactsDir, 'results.json'), '[]');
-  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=', 'base64');
-  await fs.writeFile(path.join(screenshotsDir, 'example.png'), png);
+const { buildHtml } = emailInternals;
+
+function makeResult(overrides = {}) {
   return {
-    config: { projectRoot, artifactsDir, screenshotsDir, emailMaxAttachmentBytes: 1024 * 1024 }, png,
-    result: { url: 'https://example.com/', status: 'PASS', httpStatus: 200, loadTimeMs: 100,
-      issues: [], checkedAt: '2026-09-08T00:00:00Z', screenshotPath: 'artifacts/screenshots/example.png' },
+    url: 'https://example.com/',
+    finalUrl: 'https://example.com/',
+    status: 'PASS',
+    httpStatus: 200,
+    loadTimeMs: 1200,
+    issues: [],
+    brokenImages: [],
+    jsErrors: [],
+    consoleErrors: [],
+    failedRequests: [],
+    screenshotPath: 'artifacts/screenshots/example-com.png',
+    emailImagePath: null,
+    checkedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
   };
 }
-const env = { SMTP_HOST: 'smtp.example.com', SMTP_USER: 'gee@digitalfeet.com', SMTP_PASS: 'test-secret' };
 
-test('email contains all recipients, results, and actual screenshot MIME attachment, including PASS sites', async (t) => {
-  const { config, result, png } = await fixture(t);
-  const [message] = await buildEmailMessages([result, { ...result, status: 'BROKEN', issues: ['DNS failure'], screenshotError: 'Failed' }], 1500, config, env.SMTP_USER);
-  assert.deepEqual(message.to, ['gee@digitalfeet.com', 'romeo@digitalfeet.com', 'jason@digitalfeet.com', 'levi@digitalfeet.com']);
-  assert.equal(message.from, 'gee@digitalfeet.com');
-  assert.match(message.text, /1 PASS, 0 REVIEW, 1 BROKEN/);
-  assert.match(message.text, /DNS failure/);
-  assert.match(message.text, /Screenshots unavailable for: https:\/\/example.com\//);
-  assert.deepEqual(message.attachments.map((a) => a.filename), ['results.csv', 'results.json', 'example.png']);
-  assert.deepEqual(message.attachments[2].content, png);
-  const transport = nodemailer.createTransport({ streamTransport: true, buffer: true });
-  const { message: mime } = await transport.sendMail(message);
-  assert.match(mime.toString(), /Content-Type: image\/png; name=example.png/);
-  assert.match(mime.toString(), /Content-Disposition: attachment; filename=example.png/);
-  assert.ok(mime.toString().replace(/\r?\n/g, '').includes(png.toString('base64')));
+function makeConfig(projectRoot, overrides = {}) {
+  return {
+    projectRoot,
+    email: {
+      apiKey: 'test-key',
+      apiBase: 'http://127.0.0.1:1/unused',
+      from: 'onboarding@resend.dev',
+      to: ['dev@example.com'],
+      subjectPrefix: 'Homepage audit',
+      timeout: 5000,
+      jpegQuality: 70,
+      attachmentBudgetMb: 12,
+      inlineScreenshots: 'all',
+      ...overrides,
+    },
+  };
+}
+
+test('subject summarises problems, or says all clear', () => {
+  const config = makeConfig('/tmp');
+  assert.equal(
+    buildSubject([makeResult(), makeResult()], config),
+    'Homepage audit: all 2 sites OK',
+  );
+  assert.equal(
+    buildSubject([makeResult(), makeResult({ status: 'BROKEN' }), makeResult({ status: 'REVIEW' })], config),
+    'Homepage audit: 1 broken, 1 to review of 3 sites',
+  );
 });
 
-test('splits attachments without dropping any and rejects an oversized single attachment before sending', async (t) => {
-  const { config, result } = await fixture(t);
-  config.emailMaxAttachmentBytes = 80;
-  const messages = await buildEmailMessages([result], 100, config, env.SMTP_USER);
-  assert.equal(messages.length, 2);
-  assert.match(messages[1].subject, /part 2\/2/);
-  assert.equal(messages.flatMap((m) => m.attachments).length, 3);
-  for (const message of messages) assert.ok(message.attachments.reduce((sum, a) => sum + a.content.length, 0) <= 80);
-  config.emailMaxAttachmentBytes = 10;
-  await assert.rejects(buildEmailMessages([result], 100, config, env.SMTP_USER), /exceeds EMAIL_MAX_ATTACHMENT_BYTES/);
+test('plain-text body lists every site and each issue', () => {
+  const results = [
+    makeResult({ url: 'https://ok.com/', finalUrl: 'https://ok.com/' }),
+    makeResult({
+      url: 'https://bad.com/', finalUrl: 'https://bad.com/', status: 'BROKEN',
+      httpStatus: 500, issues: ['Homepage returned HTTP 500', 'Error page detected'],
+    }),
+  ];
+  const body = buildText(results, 31_200);
+  assert.match(body, /1 PASS, 0 REVIEW, 1 BROKEN/);
+  assert.match(body, /Homepage returned HTTP 500/);
+  assert.match(body, /Error page detected/);
+  assert.match(body, /ok\.com/);
+  assert.match(body, /bad\.com/);
 });
 
-test('missing and failed screenshots are disclosed and stale files are not attached', async (t) => {
-  const { config, result } = await fixture(t);
-  for (const override of [{ screenshotError: 'Failed' }, { screenshotPath: 'artifacts/screenshots/missing.png' }]) {
-    const [message] = await buildEmailMessages([{ ...result, ...override }], 100, config, env.SMTP_USER);
-    assert.equal(message.attachments.length, 2);
-    assert.match(message.text, /Screenshots unavailable/);
-  }
-  await assert.rejects(buildEmailMessages([{ ...result, screenshotPath: 'package.json' }], 100, config, env.SMTP_USER), /outside/);
+test('html escapes site-controlled text so a page title cannot inject markup', () => {
+  const results = [makeResult({ status: 'REVIEW', issues: ['<script>alert(1)</script>'] })];
+  const html = buildHtml(results, 1000, { skipped: [] }, makeConfig('/tmp'));
+  assert.ok(!html.includes('<script>alert(1)</script>'));
+  assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
 });
 
-test('unconfigured local sending skips but required or partial configuration fails', async () => {
-  const unusedTransport = () => { throw new Error('Should not create transport'); };
-  await sendEmailNotifications([], 0, {}, {}, unusedTransport);
-  await assert.rejects(sendEmailNotifications([], 0, {}, { EMAIL_REQUIRED: 'true' }, unusedTransport), /configuration missing/);
-  await assert.rejects(sendEmailNotifications([], 0, {}, { SMTP_HOST: 'smtp.example.com' }, unusedTransport), /SMTP_USER, SMTP_PASS/);
+test('attachments are ordered BROKEN, then REVIEW, then PASS', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'email-order-'));
+  const write = async (name) => {
+    await fs.writeFile(path.join(dir, name), Buffer.alloc(1024, 1));
+    return name;
+  };
+  const results = [
+    makeResult({ url: 'https://p.com/', finalUrl: 'https://p.com/', emailImagePath: await write('p.jpg') }),
+    makeResult({ url: 'https://b.com/', finalUrl: 'https://b.com/', status: 'BROKEN', emailImagePath: await write('b.jpg') }),
+    makeResult({ url: 'https://r.com/', finalUrl: 'https://r.com/', status: 'REVIEW', emailImagePath: await write('r.jpg') }),
+  ];
+
+  const { attachments, skipped } = await collectAttachments(results, makeConfig(dir));
+  assert.deepEqual(attachments.map((a) => a.filename), ['b.jpg', 'r.jpg', 'p.jpg']);
+  assert.equal(skipped.length, 0);
+  assert.equal(attachments[0].content_type, 'image/jpeg');
+  assert.ok(attachments[0].content_id.startsWith('shot-'));
 });
 
-test('requires encrypted SMTP, checks acceptance for all recipients, and closes transport on failure', async (t) => {
-  const { config, result } = await fixture(t);
-  let closed = 0;
-  for (const port of ['465', '587']) {
-    await sendEmailNotifications([result], 100, config, { ...env, SMTP_PORT: port }, (options) => {
-      assert.equal(options.secure, port === '465');
-      assert.equal(options.requireTLS, true);
-      return { sendMail: async () => ({ accepted: [...recipients], rejected: [] }), close: () => closed++ };
+test('the attachment budget drops healthy sites first and records why', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'email-budget-'));
+  const big = 700 * 1024;
+  await fs.writeFile(path.join(dir, 'broken.jpg'), Buffer.alloc(big, 1));
+  await fs.writeFile(path.join(dir, 'pass.jpg'), Buffer.alloc(big, 1));
+
+  const results = [
+    makeResult({ url: 'https://pass.com/', finalUrl: 'https://pass.com/', emailImagePath: 'pass.jpg' }),
+    makeResult({ url: 'https://broken.com/', finalUrl: 'https://broken.com/', status: 'BROKEN', emailImagePath: 'broken.jpg' }),
+  ];
+
+  // Budget fits exactly one of the two files.
+  const { attachments, skipped } = await collectAttachments(results, makeConfig(dir, { attachmentBudgetMb: 1 }));
+  assert.deepEqual(attachments.map((a) => a.filename), ['broken.jpg']);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].name, 'pass.com');
+  assert.match(skipped[0].reason, /attachment limit/);
+});
+
+test('a missing screenshot is reported, not fatal', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'email-missing-'));
+  const results = [
+    makeResult({ emailImagePath: null }),
+    makeResult({ url: 'https://gone.com/', finalUrl: 'https://gone.com/', emailImagePath: 'nope.jpg' }),
+  ];
+  const { attachments, skipped } = await collectAttachments(results, makeConfig(dir));
+  assert.equal(attachments.length, 0);
+  assert.equal(skipped.length, 2);
+  assert.match(skipped[0].reason, /no screenshot captured/);
+  assert.match(skipped[1].reason, /unreadable/);
+});
+
+test('missing configuration skips sending instead of throwing', async () => {
+  const noKey = makeConfig('/tmp', { apiKey: '' });
+  assert.deepEqual(await sendEmailReport([makeResult()], 1000, noKey), { skipped: true });
+
+  const noRecipient = makeConfig('/tmp', { to: [] });
+  assert.deepEqual(await sendEmailReport([makeResult()], 1000, noRecipient), { skipped: true });
+});
+
+test('sends one digest with the expected Resend request shape', async () => {
+  const http = await import('node:http');
+  const received = [];
+  const server = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      received.push({ url: req.url, method: req.method, auth: req.headers.authorization, body: JSON.parse(body) });
+      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id: 'email_123' }));
     });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'email-send-'));
+  await fs.writeFile(path.join(dir, 'a.jpg'), Buffer.alloc(2048, 7));
+  const results = [
+    makeResult({ emailImagePath: 'a.jpg' }),
+    makeResult({ url: 'https://r.com/', finalUrl: 'https://r.com/', status: 'REVIEW', issues: ['2 broken images'] }),
+  ];
+
+  const config = makeConfig(dir, { apiBase: `http://127.0.0.1:${port}`, to: ['a@example.com', 'b@example.com'] });
+  const outcome = await sendEmailReport(results, 31_200, config);
+  server.close();
+
+  assert.deepEqual(outcome, { skipped: false, sent: true, attachments: 1 });
+  assert.equal(received.length, 1, 'exactly one digest email');
+  const [request] = received;
+  assert.equal(request.method, 'POST');
+  assert.equal(request.url, '/emails');
+  assert.equal(request.auth, 'Bearer test-key');
+  assert.deepEqual(request.body.to, ['a@example.com', 'b@example.com']);
+  assert.equal(request.body.from, 'onboarding@resend.dev');
+  assert.match(request.body.subject, /1 to review of 2 sites/);
+  assert.equal(request.body.attachments.length, 1);
+  assert.match(request.body.html, /Full-page screenshots/);
+  assert.match(request.body.html, /2 broken images/);
+  assert.ok(request.body.text.includes('2 broken images'));
+});
+
+test('a Resend error is swallowed so the audit still succeeds', async () => {
+  const http = await import('node:http');
+  const server = http.createServer((req, res) => {
+    res.writeHead(422, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ message: 'domain is not verified' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+
+  const config = makeConfig(os.tmpdir(), { apiBase: `http://127.0.0.1:${port}` });
+  const outcome = await sendEmailReport([makeResult()], 1000, config);
+  server.close();
+  assert.deepEqual(outcome, { skipped: false, sent: false });
+});
+
+test('EMAIL_INLINE_SCREENSHOTS controls inline embedding, never attachments', () => {
+  const results = [
+    makeResult({ url: 'https://ok.com/', finalUrl: 'https://ok.com/', emailImagePath: 'ok.jpg' }),
+    makeResult({ url: 'https://bad.com/', finalUrl: 'https://bad.com/', status: 'BROKEN', emailImagePath: 'bad.jpg' }),
+  ];
+  const render = (inlineScreenshots) =>
+    buildHtml(results, 1000, { skipped: [] }, makeConfig('/tmp', { inlineScreenshots }));
+
+  const all = render('all');
+  assert.equal((all.match(/<img src="cid:/g) || []).length, 2);
+
+  const issues = render('issues');
+  assert.equal((issues.match(/<img src="cid:/g) || []).length, 1);
+  assert.match(issues, /cid:shot-bad-jpg/);
+
+  const none = render('none');
+  assert.equal((none.match(/<img src="cid:/g) || []).length, 0);
+  assert.ok(!none.includes('Full-page screenshots</h2>'));
+
+  // The attachment promise in the body must hold in every mode.
+  for (const html of [all, issues, none]) {
+    assert.match(html, /All 2 full-page screenshots are attached/);
   }
-  await assert.rejects(sendEmailNotifications([result], 100, config, env, () => ({
-    sendMail: async () => ({ accepted: recipients.slice(1), rejected: [recipients[0]] }), close: () => closed++,
-  })), /not accepted for all/);
-  await assert.rejects(sendEmailNotifications([result], 100, config, env, () => ({
-    sendMail: async () => { throw new Error('test-secret'); }, close: () => closed++,
-  })), (error) => !error.message.includes('test-secret') && error.message.includes('failed'));
-  assert.equal(closed, 4);
 });

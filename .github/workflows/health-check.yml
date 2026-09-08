@@ -3,8 +3,17 @@ name: Website Homepage Audit
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is UTC. 00:00 UTC is 08:00 in the Philippines (UTC+8).
-    - cron: '0 0 * * *'
+    # GitHub cron is always UTC. The Philippines is UTC+8, so subtract 8 hours
+    # from the local time you want:
+    #   10:00 PHT = 02:00 UTC  <- current setting
+    #   08:00 PHT = 00:00 UTC   |   12:00 PHT = 04:00 UTC
+    #
+    # The minute is deliberately not :00. GitHub queues scheduled jobs and the
+    # top of the hour is the most contended slot - this repo's runs on
+    # '0 0 * * *' consistently started ~4 hours late. An off-peak minute
+    # reduces that. GitHub still makes no delivery-time guarantee, so if runs
+    # remain persistently late, shift this cron earlier to compensate.
+    - cron: '17 2 * * *'
 
 permissions:
   contents: read
@@ -33,12 +42,17 @@ jobs:
       - name: Audit homepages
         run: npm run check
         env:
-          EMAIL_REQUIRED: 'true'
-          EMAIL_FROM: gee@digitalfeet.com
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          # The API key is the only real secret here. It is exposed only to
+          # this step and is never echoed. A missing key skips the email; the
+          # audit and its artifacts still run.
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+
+          # Recipients and sender are plain configuration, so they live in
+          # Actions *variables* (Settings -> Secrets and variables -> Actions
+          # -> Variables), where they stay readable and editable. A secret
+          # named EMAIL_TO still works as a fallback if one already exists.
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
 
       - name: Upload screenshots and reports
         if: always()
