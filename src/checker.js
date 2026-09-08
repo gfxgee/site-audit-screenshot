@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { classify, isIgnoredUrl } from './classifier.js';
-import { errorMessage, limitPush, relativePath } from './utils.js';
+import { errorMessage, limitPush, relativePath, withTimeout } from './utils.js';
 
 /** Sibling .jpg path for a screenshot's .png path. */
 export function emailImagePath(screenshotPath) {
@@ -21,7 +21,7 @@ const ERROR_PAGE_PATTERNS = [
 ];
 
 async function lazyScroll(page, config) {
-  await page.evaluate(async ({ viewportHeight, delay, maxSteps }) => {
+  await withTimeout(page.evaluate(async ({ viewportHeight, delay, maxSteps }) => {
     const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
     let steps = 0;
     let previousHeight = 0;
@@ -45,11 +45,15 @@ async function lazyScroll(page, config) {
     viewportHeight: config.viewport.height,
     delay: config.scrollDelay,
     maxSteps: config.scrollMaxSteps,
-  });
+  }),
+  // The in-page loop is bounded by maxSteps * delay, but a page whose main
+  // thread is blocked can stretch each await indefinitely.
+  config.scrollMaxSteps * config.scrollDelay + config.evaluateTimeout,
+  'Lazy-load scroll');
 }
 
-async function inspectPage(page) {
-  return page.evaluate(() => {
+async function inspectPage(page, config) {
+  return withTimeout(page.evaluate((maxInspectedElements) => {
     const isVisible = (element) => {
       const style = getComputedStyle(element);
       const box = element.getBoundingClientRect();
@@ -79,14 +83,28 @@ async function inspectPage(page) {
     const overflowPixels = Math.max(0, root.scrollWidth - window.innerWidth);
     const overflowTolerance = Math.max(20, Math.round(window.innerWidth * 0.02));
     const minimumMajorWidth = Math.max(300, window.innerWidth * 0.25);
-    const overflowElements = [...document.querySelectorAll('body *')]
-      .filter(isVisible)
-      .map((element) => {
-        const box = element.getBoundingClientRect();
-        return { tag: element.tagName.toLowerCase(), left: Math.round(box.left), right: Math.round(box.right), width: Math.round(box.width) };
-      })
-      .filter((box) => box.width >= minimumMajorWidth && (box.left < -overflowTolerance || box.right > window.innerWidth + overflowTolerance))
-      .slice(0, 10);
+    // Bounded, short-circuiting walk. isVisible() forces style and layout per
+    // element, so scanning an entire large DOM is far too slow on a small
+    // runner; stop after 10 hits or maxInspectedElements examined.
+    const overflowElements = [];
+    const candidates = document.querySelectorAll('body *');
+    const examineLimit = Math.min(candidates.length, maxInspectedElements);
+    for (let index = 0; index < examineLimit; index += 1) {
+      if (overflowElements.length >= 10) break;
+      const element = candidates[index];
+      const box = element.getBoundingClientRect();
+      // Cheap geometric rejections first, before any style resolution.
+      if (box.width < minimumMajorWidth) continue;
+      if (box.left >= -overflowTolerance && box.right <= window.innerWidth + overflowTolerance) continue;
+      if (!isVisible(element)) continue;
+      overflowElements.push({
+        tag: element.tagName.toLowerCase(),
+        left: Math.round(box.left),
+        right: Math.round(box.right),
+        width: Math.round(box.width),
+      });
+    }
+    const inspectionTruncated = candidates.length > examineLimit;
 
     const height = Math.max(body?.scrollHeight ?? 0, root.scrollHeight);
     const bodyVisible = Boolean(body && isVisible(body));
@@ -104,6 +122,8 @@ async function inspectPage(page) {
       documentWidth: root.scrollWidth,
       meaningfulElementCount: meaningfulElements.length,
       imageCount: images.length,
+      elementCount: candidates.length,
+      inspectionTruncated,
       brokenImages,
       blankPageDetected,
       layout: {
@@ -115,7 +135,7 @@ async function inspectPage(page) {
         suspiciousCollapsed,
       },
     };
-  });
+  }, config.maxInspectedElements), config.evaluateTimeout, 'Page inspection');
 }
 
 function detectSuspiciousText(inspection, httpStatus) {
@@ -152,6 +172,7 @@ function baseResult(url, screenshotPath, projectRoot) {
     screenshotError: null,
     emailImagePath: null,
     emailImageError: null,
+    lazyScrollError: null,
     blankPageDetected: false,
     errorPageDetected: false,
     layout: { overflowPixels: 0, overflowElements: [], suspiciousCollapsed: false },
@@ -211,13 +232,18 @@ export async function checkSite(browser, url, screenshotPath, config) {
 
     if (!result.navigationError) {
       await page.waitForTimeout(config.postLoadWait);
-      await lazyScroll(page, config);
+      try {
+        await lazyScroll(page, config);
+      } catch (error) {
+        // A stalled scroll pass must not lose the screenshot or the checks.
+        result.lazyScrollError = errorMessage(error);
+      }
       await page.waitForTimeout(config.postLoadWait);
     }
 
     let inspection;
     try {
-      inspection = await inspectPage(page);
+      inspection = await inspectPage(page, config);
       result.brokenImages = inspection.brokenImages.slice(0, config.maxFailedRequests);
       result.horizontalOverflow = inspection.layout.horizontalOverflow;
       result.layout = inspection.layout;
@@ -230,6 +256,8 @@ export async function checkSite(browser, url, screenshotPath, config) {
         documentWidth: inspection.documentWidth,
         meaningfulElementCount: inspection.meaningfulElementCount,
         imageCount: inspection.imageCount,
+        elementCount: inspection.elementCount,
+        inspectionTruncated: inspection.inspectionTruncated,
       };
       result.suspiciousText = detectSuspiciousText(inspection, result.httpStatus);
       result.errorPageDetected = result.suspiciousText.length > 0;
@@ -238,7 +266,7 @@ export async function checkSite(browser, url, screenshotPath, config) {
     }
 
     try {
-      await page.screenshot({ path: screenshotPath, fullPage: true });
+      await page.screenshot({ path: screenshotPath, fullPage: true, timeout: config.screenshotTimeout });
     } catch (error) {
       result.screenshotError = errorMessage(error);
     }
@@ -252,6 +280,7 @@ export async function checkSite(browser, url, screenshotPath, config) {
         fullPage: true,
         type: 'jpeg',
         quality: config.email.jpegQuality,
+        timeout: config.screenshotTimeout,
       });
       result.emailImagePath = relativePath(config.projectRoot, emailImagePath(screenshotPath));
     } catch (error) {

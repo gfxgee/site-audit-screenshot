@@ -65,6 +65,19 @@ export const config = Object.freeze({
   scrollDelay: positiveInteger('SCROLL_DELAY', 250),
   scrollMaxSteps: positiveInteger('SCROLL_MAX_STEPS', 100),
 
+  // --- stall guards -------------------------------------------------------
+  // NAVIGATION_TIMEOUT only bounds page.goto. These bound everything else, so
+  // a single unresponsive page is recorded as BROKEN instead of hanging the
+  // run until the GitHub job hits its own 30-minute ceiling.
+  siteTimeout: positiveInteger('SITE_TIMEOUT', 90_000),
+  evaluateTimeout: positiveInteger('EVALUATE_TIMEOUT', 20_000),
+  screenshotTimeout: positiveInteger('SCREENSHOT_TIMEOUT', 45_000),
+  // Cap on elements examined for layout overflow. The check calls
+  // getComputedStyle plus getBoundingClientRect per element, which forces
+  // style and layout work; an uncapped DOM walk is very slow on a 2-core
+  // runner with several pages open at once.
+  maxInspectedElements: positiveInteger('MAX_INSPECTED_ELEMENTS', 4_000),
+
   // --- email report (Resend) ---------------------------------------------
   // The API key is read from the environment only; it is never logged.
   email: Object.freeze({

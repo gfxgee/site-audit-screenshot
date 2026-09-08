@@ -63,6 +63,10 @@ All configuration is optional and supplied through environment variables:
 | `MAX_FAILED_REQUESTS` | `30` | Maximum stored failed/HTTP-error requests per site |
 | `SCROLL_DELAY` | `250` | Delay between lazy-loading scroll steps in milliseconds |
 | `SCROLL_MAX_STEPS` | `100` | Safety limit for lazy-loading scroll steps |
+| `SITE_TIMEOUT` | `90000` | Hard per-site ceiling; a site exceeding it is recorded `BROKEN` |
+| `EVALUATE_TIMEOUT` | `20000` | Timeout for in-page inspection scripts |
+| `SCREENSHOT_TIMEOUT` | `45000` | Timeout per full-page screenshot |
+| `MAX_INSPECTED_ELEMENTS` | `4000` | Cap on elements examined for layout overflow |
 | `RESEND_API_KEY` | _(unset)_ | Resend API key. **Secret** — without it the email is skipped |
 | `EMAIL_TO` | _(unset)_ | Recipients, comma separated. Without it the email is skipped |
 | `EMAIL_FROM` | `onboarding@resend.dev` | Sender. Needs a Resend-verified domain to send anywhere else |
@@ -195,6 +199,30 @@ minute reduces that queueing.
 GitHub still offers no delivery-time guarantee for scheduled workflows, so treat
 the time as approximate. If runs stay persistently late, shift the cron earlier
 by the observed lag to compensate.
+
+## Stall guards
+
+`NAVIGATION_TIMEOUT` bounds only `page.goto`. Playwright's `page.evaluate()` has
+no timeout of its own, so a page whose main thread never yields can stall a
+worker indefinitely — which once let a 13-site run reach the GitHub job's
+30-minute ceiling and get cancelled, losing the email.
+
+Every page operation is now bounded:
+
+- `SITE_TIMEOUT` (90s) is a hard ceiling per site. A site that exceeds it is
+  abandoned and recorded as `BROKEN` with the reason, and the run continues.
+- `EVALUATE_TIMEOUT` bounds the lazy-scroll pass and the page inspection.
+- `SCREENSHOT_TIMEOUT` bounds each full-page capture.
+- `MAX_INSPECTED_ELEMENTS` caps the layout-overflow DOM walk, which resolves
+  style and layout per element. The walk also short-circuits after 10 hits.
+- `browser.close()` is bounded, since a site abandoned mid-call can leave a
+  context that makes closing hang.
+- The process exits explicitly after reporting, so an abandoned Chromium child
+  cannot keep the event loop alive after the audit has finished.
+
+The worst case is therefore roughly `SITE_TIMEOUT * sites / CONCURRENCY` plus
+the email, rather than unbounded. The run log prints how long the email step
+took, so a slow upload is visible rather than looking like a hang.
 
 ## Results
 

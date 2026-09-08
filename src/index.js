@@ -6,7 +6,7 @@ import { checkSite } from './checker.js';
 import { config } from './config.js';
 import { readSites, resultsToCsv } from './csv.js';
 import { sendEmailReport } from './email.js';
-import { ensureDirectory, errorMessage, formatDuration, hostLabel, screenshotNames } from './utils.js';
+import { ensureDirectory, errorMessage, formatDuration, hostLabel, screenshotNames, withTimeout } from './utils.js';
 
 async function runWithConcurrency(items, limit, worker, recover) {
   const results = new Array(items.length);
@@ -47,7 +47,7 @@ function unexpectedResult(url, filename, error) {
     horizontalOverflow: false, suspiciousText: [],
     issues: [`Unexpected check failure: ${message}`],
     screenshotPath: `artifacts/screenshots/${filename}`, screenshotError: null,
-    emailImagePath: null, emailImageError: null,
+    emailImagePath: null, emailImageError: null, lazyScrollError: null,
     blankPageDetected: false, errorPageDetected: false,
     layout: { overflowPixels: 0, overflowElements: [], suspiciousCollapsed: false },
     pageMetrics: null, checkedAt,
@@ -70,18 +70,32 @@ async function main() {
       console.log(`${label} Checking ${url}`);
       const screenshotPath = path.join(config.screenshotsDir, filenames[index]);
 
-      const result = await checkSite(browser, url, screenshotPath, config);
+      // Hard per-site ceiling. NAVIGATION_TIMEOUT only bounds page.goto, so
+      // without this one unresponsive page stalls a worker until the GitHub
+      // job hits its own 30-minute limit and cancels the whole run.
+      const result = await withTimeout(
+        checkSite(browser, url, screenshotPath, config),
+        config.siteTimeout,
+        `Audit of ${url}`,
+      );
       const detail = result.issues[0] ?? `HTTP ${result.httpStatus ?? 'n/a'} - ${formatDuration(result.loadTimeMs ?? 0)}`;
       console.log(`[${result.status}] ${hostLabel(url)} - ${detail}`);
       return result;
     }, (error, url, index) => unexpectedResult(url, filenames[index], error));
   } finally {
-    await browser.close();
+    // A site abandoned by the per-site timeout can leave a context mid-call,
+    // which makes browser.close() itself hang. Bound it too.
+    await withTimeout(browser.close(), 30_000, 'Browser close').catch((error) => {
+      console.warn(`Browser did not close cleanly: ${errorMessage(error)}`);
+    });
   }
 
   await writeReports(results);
   const durationMs = Date.now() - auditStartedAt;
+
+  const emailStartedAt = Date.now();
   await sendEmailReport(results, durationMs, config);
+  console.log(`Email step took ${formatDuration(Date.now() - emailStartedAt)}.`);
 
   const totals = Object.fromEntries(['PASS', 'REVIEW', 'BROKEN'].map((status) => [status, results.filter((result) => result.status === status).length]));
   console.log(`Audit complete in ${formatDuration(durationMs)}: ${totals.PASS} PASS, ${totals.REVIEW} REVIEW, ${totals.BROKEN} BROKEN.`);
@@ -89,10 +103,19 @@ async function main() {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch((error) => {
-    console.error(`Fatal audit error: ${errorMessage(error)}`);
-    process.exitCode = 1;
-  });
+  main()
+    .catch((error) => {
+      console.error(`Fatal audit error: ${errorMessage(error)}`);
+      process.exitCode = 1;
+    })
+    .finally(async () => {
+      // Exit explicitly. An abandoned Chromium child process can keep the
+      // event loop alive indefinitely, which previously let the GitHub job
+      // run to its 30-minute ceiling after the audit had already finished.
+      // Flush stdout first so the final lines are not truncated.
+      await new Promise((resolve) => process.stdout.write('', resolve));
+      process.exit(process.exitCode ?? 0);
+    });
 }
 
 export const indexInternals = { runWithConcurrency, unexpectedResult };

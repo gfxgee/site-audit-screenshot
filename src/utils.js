@@ -52,3 +52,22 @@ export function formatDuration(milliseconds) {
 export function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
+
+/**
+ * Reject if `promise` has not settled within `milliseconds`.
+ *
+ * Playwright's page.evaluate() has no timeout option of its own, so a page
+ * with a busy main thread can stall a worker indefinitely. This is the guard
+ * that keeps one bad site from hanging the whole run. The underlying promise
+ * is not cancelled; the caller is expected to tear the context down after.
+ */
+export function withTimeout(promise, milliseconds, label) {
+  let timer;
+  const expiry = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} exceeded ${milliseconds}ms`)),
+      milliseconds,
+    );
+  });
+  return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
+}
