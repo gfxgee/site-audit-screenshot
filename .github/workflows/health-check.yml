@@ -3,8 +3,17 @@ name: Website Homepage Audit
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is UTC. 00:00 UTC is 08:00 in the Philippines (UTC+8).
-    - cron: '0 0 * * *'
+    # GitHub cron is always UTC. The Philippines is UTC+8, so subtract 8 hours
+    # from the local time you want:
+    #   10:00 PHT = 02:00 UTC  <- current setting
+    #   08:00 PHT = 00:00 UTC   |   12:00 PHT = 04:00 UTC
+    #
+    # The minute is deliberately not :00. GitHub queues scheduled jobs and the
+    # top of the hour is the most contended slot - this repo's runs on
+    # '0 0 * * *' consistently started ~4 hours late. An off-peak minute
+    # reduces that. GitHub still makes no delivery-time guarantee, so if runs
+    # remain persistently late, shift this cron earlier to compensate.
+    - cron: '17 2 * * *'
 
 permissions:
   contents: read

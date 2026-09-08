@@ -151,9 +151,32 @@ GitHub
 
 ### Scheduled run
 
-The default schedule is daily at `00:00 UTC`, which is `08:00` in the Philippines (`UTC+8`). GitHub Actions cron expressions always use UTC. To change the time, edit the `cron` value in `.github/workflows/health-check.yml`; for example, `0 1 * * *` means 01:00 UTC / 09:00 Philippines time.
+The audit runs daily at **10:00 Philippine time**. GitHub Actions cron is always
+UTC and the Philippines is UTC+8, so the configured expression is:
 
-GitHub may delay scheduled jobs during periods of high load, so the start time is approximate.
+```yaml
+schedule:
+  - cron: '17 2 * * *'   # 02:17 UTC = 10:17 PHT
+```
+
+To change the time, subtract 8 hours from the local time you want:
+
+| Philippine time | cron (UTC) |
+| --- | --- |
+| 06:00 PHT | `'17 22 * * *'` |
+| 08:00 PHT | `'17 0 * * *'` |
+| 10:00 PHT | `'17 2 * * *'` (current) |
+| 12:00 PHT | `'17 4 * * *'` |
+| 18:00 PHT | `'17 10 * * *'` |
+
+The minute is deliberately `17` rather than `0`. GitHub queues scheduled jobs
+and the top of the hour is the most contended slot — while this repository was
+set to `'0 0 * * *'`, every run started roughly four hours late. An off-peak
+minute reduces that queueing.
+
+GitHub still offers no delivery-time guarantee for scheduled workflows, so treat
+the time as approximate. If runs stay persistently late, shift the cron earlier
+by the observed lag to compensate.
 
 ## Results
 
