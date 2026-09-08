@@ -31,5 +31,5 @@ export const config = Object.freeze({
   maxFailedRequests: positiveInteger('MAX_FAILED_REQUESTS', 30),
   scrollDelay: positiveInteger('SCROLL_DELAY', 250),
   scrollMaxSteps: positiveInteger('SCROLL_MAX_STEPS', 100),
-  teamsTimeout: positiveInteger('TEAMS_TIMEOUT', 10_000),
+  emailMaxAttachmentBytes: positiveInteger('EMAIL_MAX_ATTACHMENT_BYTES', 12 * 1024 * 1024),
 });

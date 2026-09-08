@@ -5,7 +5,7 @@ import { chromium } from 'playwright';
 import { checkSite } from './checker.js';
 import { config } from './config.js';
 import { readSites, resultsToCsv } from './csv.js';
-import { sendTeamsNotifications } from './teams.js';
+import { sendEmailNotifications } from './email.js';
 import { ensureDirectory, errorMessage, formatDuration, hostLabel, screenshotNames } from './utils.js';
 
 async function runWithConcurrency(items, limit, worker, recover) {
@@ -46,7 +46,7 @@ function unexpectedResult(url, filename, error) {
     brokenImages: [], jsErrors: [], consoleErrors: [], failedRequests: [],
     horizontalOverflow: false, suspiciousText: [],
     issues: [`Unexpected check failure: ${message}`],
-    screenshotPath: `artifacts/screenshots/${filename}`, screenshotError: null,
+    screenshotPath: `artifacts/screenshots/${filename}`, screenshotError: 'Screenshot unavailable after unexpected check failure',
     blankPageDetected: false, errorPageDetected: false,
     layout: { overflowPixels: 0, overflowElements: [], suspiciousCollapsed: false },
     pageMetrics: null, checkedAt,
@@ -80,7 +80,7 @@ async function main() {
 
   await writeReports(results);
   const durationMs = Date.now() - auditStartedAt;
-  await sendTeamsNotifications(results, durationMs, config);
+  await sendEmailNotifications(results, durationMs, config);
 
   const totals = Object.fromEntries(['PASS', 'REVIEW', 'BROKEN'].map((status) => [status, results.filter((result) => result.status === status).length]));
   console.log(`Audit complete in ${formatDuration(durationMs)}: ${totals.PASS} PASS, ${totals.REVIEW} REVIEW, ${totals.BROKEN} BROKEN.`);

@@ -45,7 +45,7 @@ Run the deterministic classification tests with:
 npm test
 ```
 
-The audit works without Microsoft Teams configured. In that case it still creates every screenshot and report, logs one warning, and skips notifications.
+Local audits work without email configured: screenshots and reports are saved and a warning explains that email was skipped. GitHub Actions requires email configuration, so missing settings or delivery failures fail the job after saving the artifacts.
 
 ## Configuration
 
@@ -63,7 +63,7 @@ All configuration is optional and supplied through environment variables:
 | `MAX_FAILED_REQUESTS` | `30` | Maximum stored failed/HTTP-error requests per site |
 | `SCROLL_DELAY` | `250` | Delay between lazy-loading scroll steps in milliseconds |
 | `SCROLL_MAX_STEPS` | `100` | Safety limit for lazy-loading scroll steps |
-| `TEAMS_TIMEOUT` | `10000` | Teams webhook request timeout in milliseconds |
+| `EMAIL_MAX_ATTACHMENT_BYTES` | `12582912` | Maximum raw attachment bytes per email; larger runs are split into numbered parts |
 
 For PowerShell, a one-run override looks like:
 
@@ -72,39 +72,29 @@ $env:CONCURRENCY = '2'
 npm run check
 ```
 
-## Microsoft Teams setup
+## Email setup
 
-The existing Power Automate webhook must be saved as a GitHub Actions repository secret. The URL is read only from `process.env.TEAMS_WEBHOOK_URL`; it is never hardcoded or logged.
+Each audit emails **gee@digitalfeet.com**, **romeo@digitalfeet.com**, **jason@digitalfeet.com**, and **levi@digitalfeet.com** from **gee@digitalfeet.com**. Teams notifications have been removed.
 
-In GitHub, open:
+The email body lists every website's status, URL, HTTP status, load time, issues, and check timestamp. Attachments include `results.csv`, `results.json`, and every available screenshot, including PASS sites. Missing or failed screenshots are explicitly listed in the body. A failed capture never attaches a stale screenshot from an earlier local run.
 
-```text
-Repository
-→ Settings
-→ Secrets and variables
-→ Actions
-→ New repository secret
-```
+In GitHub, open **Settings → Secrets and variables → Actions** and add these repository secrets:
 
-Create a secret named `TEAMS_WEBHOOK_URL` and paste the existing Power Automate webhook URL as its value. Do not add the URL to source files or workflow YAML.
+| Secret | Value |
+| --- | --- |
+| `SMTP_HOST` | SMTP hostname supplied by the sender's mail provider |
+| `SMTP_USER` | SMTP username for the authorized sending account |
+| `SMTP_PASS` | Provider-issued SMTP password or app password |
 
-Only `REVIEW` and `BROKEN` sites receive individual issue payloads. One aggregate summary is sent after all sites finish. Teams delivery failures are logged without exposing the webhook and do not stop the audit.
+Set the repository **variable** `SMTP_PORT` to the provider's port (default `587`; `465` is also supported). Port 465 uses TLS immediately; other ports require STARTTLS. Certificate verification remains enabled. The sender is set to `gee@digitalfeet.com` in the workflow. Your provider must authorize sending as this address and support SMTP password/app-password authentication. If the account requires OAuth or SMTP is disabled, the sending integration must be adapted to the provider before enabling delivery. Transport behavior follows the [Nodemailer SMTP documentation](https://nodemailer.com/smtp).
 
-Each issue payload contains a human-readable `websiteName`, status and URL fields, HTTP/load information, issue text and counts, a preformatted `detailsText`, and the screenshot as `screenshotContentBase64`. The original `screenshotPath` is retained only as an artifact-relative reference; it is not a public URL.
+For local runs, supply the same SMTP settings as environment variables. `EMAIL_FROM` defaults to `gee@digitalfeet.com`; `EMAIL_REQUIRED=true` makes missing configuration an error. Never commit credentials. The old `TEAMS_WEBHOOK_URL` secret is no longer used.
 
-### Display screenshots in the Teams card
+The default attachment budget is 12 MiB of raw files per message, allowing room for Base64 encoding overhead. Larger runs are split across numbered emails; the summary appears in each part and each file is attached once across the parts. Provider limits vary. Set `EMAIL_MAX_ATTACHMENT_BYTES` below your provider's message-size limit with room for encoding and body text. If a single file exceeds the budget, sending fails before any part is sent; the full files remain available in GitHub artifacts. Increase the budget only if the provider permits it.
 
-An Adaptive Card image requires an accessible image URL. The GitHub runner path cannot be used directly. In the Power Automate `type = issue` branch:
+Missing required settings, transport failures, and partial recipient rejection fail the workflow while preserving artifacts. Earlier parts may already have been accepted if a later part fails, so rerunning can produce duplicates. SMTP acceptance means the provider accepted the message; it does not confirm inbox delivery.
 
-1. Add **Create file** using OneDrive for Business or SharePoint.
-2. Set **File Name** to `triggerBody()?['screenshotFileName']`.
-3. Set **File Content** with the expression `base64ToBinary(triggerBody()?['screenshotContentBase64'])`.
-4. Create an organization-accessible sharing link for that file.
-5. Add an `Action.OpenUrl` button such as **Open full screenshot** using that sharing link.
-
-For an inline Adaptive Card `Image`, use a direct HTTPS URL that returns the image bytes and is accessible to the Teams client. Do not use a normal sharing link if it redirects: Teams does not support redirects for card image URLs. An access-controlled SharePoint direct image URL can work if it is resolvable by every intended Teams viewer; otherwise publish the image to an approved image host. The audit deliberately does not make screenshots public automatically.
-
-The issue-card title can use `triggerBody()?['title']`, which produces values such as `REVIEW: digitalfeet.com`. Use `triggerBody()?['detailsText']` for all core diagnostics in one text block. The summary card can use `triggerBody()?['summaryText']` and `triggerBody()?['websiteStatusText']`; the payload also includes a structured `websites` array with the name, status, URL, HTTP status, load time, and issues for every audited site.
+After configuring the sender and deploying the changes, use **Actions → Website Homepage Audit → Run workflow** and confirm all four inboxes receive the attachments.
 
 ## GitHub Actions
 
@@ -137,7 +127,7 @@ artifacts/results.csv
 artifacts/screenshots/
 ```
 
-The reports are written even when one or more monitored websites are `REVIEW` or `BROKEN`. These classifications are monitoring outcomes and do not fail the workflow. Only a genuine execution failure—such as Chromium failing to launch or reports being impossible to write—fails the job.
+The reports are written even when one or more monitored websites are `REVIEW` or `BROKEN`. These classifications are monitoring outcomes and do not fail the workflow. Execution failures—such as Chromium failing to launch, reports being impossible to write, or required email delivery failing—fail the job.
 
 The workflow's artifact upload uses `if: always()` and retains results for 14 days. To download them, open the completed workflow run in GitHub Actions and select the `website-audit-results-<run number>` artifact near the bottom of the run summary.
 
@@ -150,7 +140,7 @@ Generated local screenshots and reports are ignored by Git, while the artifact d
 src/index.js                        Orchestration, concurrency, reports
 src/checker.js                      Playwright navigation and page inspection
 src/classifier.js                   PASS/REVIEW/BROKEN rules and noise filters
-src/teams.js                        Power Automate webhook delivery
+src/email.js                        SMTP summary and attachment delivery
 src/csv.js                          Site input and CSV report generation
 src/config.js                       Environment configuration
 src/utils.js                        Shared utilities

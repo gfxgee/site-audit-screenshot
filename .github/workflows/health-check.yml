@@ -33,7 +33,12 @@ jobs:
       - name: Audit homepages
         run: npm run check
         env:
-          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          EMAIL_REQUIRED: 'true'
+          EMAIL_FROM: gee@digitalfeet.com
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT || '587' }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
 
       - name: Upload screenshots and reports
         if: always()

@@ -12,6 +12,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "nodemailer": "10.0.1",
     "playwright": "1.62.1"
   }
 }
