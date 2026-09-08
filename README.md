@@ -114,21 +114,39 @@ Repository
 → Actions
 ```
 
-Add two **secrets**:
+Add one **secret** — the API key is the only real secret here:
+
+```text
+Settings → Secrets and variables → Actions → Secrets tab
+```
 
 | Name | Value |
 | --- | --- |
 | `RESEND_API_KEY` | Your Resend API key (`re_...`) |
-| `EMAIL_TO` | Recipient address, or several separated by commas |
 
-Sender addresses work in two stages:
+Then add the addresses as **variables**, on the Variables tab of the same page:
 
-- **Without a verified domain**, leave `EMAIL_FROM` unset. It defaults to
-  Resend's `onboarding@resend.dev` test sender, which can only deliver to the
-  email address that owns the Resend account.
-- **With a verified domain**, add a repository **variable** named `EMAIL_FROM`
-  (e.g. `audit@yourdomain.com`) to send to any recipient. Verify the domain
-  under Domains in the Resend dashboard and add the DNS records it lists.
+```text
+Settings → Secrets and variables → Actions → Variables tab
+```
+
+| Name | Value |
+| --- | --- |
+| `EMAIL_TO` | Recipients, comma separated |
+| `EMAIL_FROM` | Sender on a Resend-verified domain, e.g. `audit@digitalfeet.com` |
+
+Recipients and sender are configuration, not credentials, so variables suit them
+better: a variable stays readable and editable, whereas a secret is write-only —
+you can overwrite it but never read it back, which makes adding one forgotten
+recipient mean retyping the whole list. Actions variables are not published with
+the repository, and the audit logs only the recipient *count*, never the
+addresses. A secret named `EMAIL_TO` still works as a fallback if one exists.
+
+`EMAIL_FROM` must be on a domain verified under Domains in the Resend dashboard.
+Until one is, leave it unset: it falls back to Resend's `onboarding@resend.dev`
+test sender, which can only deliver to the address that owns the Resend account.
+The local part does not need to be a real mailbox, though replies to it will
+bounce — use a real address or `noreply@` if that matters.
 
 Delivery failures are logged without exposing the API key and never stop the
 audit. `screenshotPath` in the reports is an artifact-relative reference, not a

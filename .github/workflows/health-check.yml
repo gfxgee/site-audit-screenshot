@@ -42,12 +42,16 @@ jobs:
       - name: Audit homepages
         run: npm run check
         env:
-          # Secrets are exposed only to this step and are never echoed.
-          # A missing key skips the email; the audit and artifacts still run.
+          # The API key is the only real secret here. It is exposed only to
+          # this step and is never echoed. A missing key skips the email; the
+          # audit and its artifacts still run.
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          EMAIL_TO: ${{ secrets.EMAIL_TO }}
-          # Optional: set an EMAIL_FROM variable once a domain is verified in
-          # Resend. Defaults to Resend's onboarding@resend.dev test sender.
+
+          # Recipients and sender are plain configuration, so they live in
+          # Actions *variables* (Settings -> Secrets and variables -> Actions
+          # -> Variables), where they stay readable and editable. A secret
+          # named EMAIL_TO still works as a fallback if one already exists.
+          EMAIL_TO: ${{ vars.EMAIL_TO || secrets.EMAIL_TO }}
           EMAIL_FROM: ${{ vars.EMAIL_FROM }}
 
       - name: Upload screenshots and reports
