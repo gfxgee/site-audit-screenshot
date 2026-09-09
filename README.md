@@ -232,56 +232,45 @@ GitHub
 
 ### Scheduled run
 
-The audit runs daily at **10:00 Philippine time**. GitHub Actions cron is always
-UTC and the Philippines is UTC+8, so the configured expression is:
+The audit is scheduled so the report lands around **10:00 Philippine time**:
 
 ```yaml
 schedule:
-  - cron: '17 2 * * *'   # 02:17 UTC = 10:17 PHT
+  - cron: '17 21 * * *'
 ```
 
-To change the time, subtract 8 hours from the local time you want:
+That is **not** 10:00 PHT converted to UTC. GitHub queues scheduled workflows
+and starts them late, and on this repository the delay is large and consistent:
 
-| Philippine time | cron (UTC) |
-| --- | --- |
-| 06:00 PHT | `'17 22 * * *'` |
-| 08:00 PHT | `'17 0 * * *'` |
-| 10:00 PHT | `'17 2 * * *'` (current) |
-| 12:00 PHT | `'17 4 * * *'` |
-| 18:00 PHT | `'17 10 * * *'` |
+| Cron (UTC) | Actual start (UTC) | Delay |
+| --- | --- | ---: |
+| `00:00` | 03:58 – 04:05 | ~4h |
+| `02:17` | 07:23 | 5h06m |
 
-The minute is deliberately `17` rather than `0`. GitHub queues scheduled jobs
-and the top of the hour is the most contended slot — while this repository was
-set to `'0 0 * * *'`, every run started roughly four hours late. An off-peak
-minute reduces that queueing.
+So the nominal time is set about five hours earlier than the time we actually
+want, to absorb the queue delay:
 
-GitHub still offers no delivery-time guarantee for scheduled workflows, so treat
-the time as approximate. If runs stay persistently late, shift the cron earlier
-by the observed lag to compensate.
+```
+21:17 UTC nominal (05:17 PHT) + ~4-5h observed delay = ~09:15-10:30 PHT
+```
 
-## Stall guards
+This fires on the previous UTC day, which is fine for a daily run. The minute is
+kept off `:00`, the most contended slot in GitHub's queue.
 
-`NAVIGATION_TIMEOUT` bounds only `page.goto`. Playwright's `page.evaluate()` has
-no timeout of its own, so a page whose main thread never yields can stall a
-worker indefinitely — which once let a 13-site run reach the GitHub job's
-30-minute ceiling and get cancelled, losing the email.
+**This is compensation, not precision.** GitHub guarantees no start time for
+scheduled workflows. If the delay shrinks, the report arrives earlier (as early
+as 05:17 PHT); if it grows, later. To re-measure and re-tune:
 
-Every page operation is now bounded:
+```bash
+gh run list --workflow=health-check.yml --json event,createdAt,conclusion
+```
 
-- `SITE_TIMEOUT` (90s) is a hard ceiling per site. A site that exceeds it is
-  abandoned and recorded as `BROKEN` with the reason, and the run continues.
-- `EVALUATE_TIMEOUT` bounds the lazy-scroll pass and the page inspection.
-- `SCREENSHOT_TIMEOUT` bounds each full-page capture.
-- `MAX_INSPECTED_ELEMENTS` caps the layout-overflow DOM walk, which resolves
-  style and layout per element. The walk also short-circuits after 10 hits.
-- `browser.close()` is bounded, since a site abandoned mid-call can leave a
-  context that makes closing hang.
-- The process exits explicitly after reporting, so an abandoned Chromium child
-  cannot keep the event loop alive after the audit has finished.
+Then shift the cron hour by the difference. To move the target time itself,
+work backwards: desired PHT − 8h = UTC, then subtract the observed delay.
 
-The worst case is therefore roughly `SITE_TIMEOUT * sites / CONCURRENCY` plus
-the email, rather than unbounded. The run log prints how long the email step
-took, so a slow upload is visible rather than looking like a hang.
+For a genuinely punctual 10:00, don't use cron — have an external scheduler
+that does honour its schedule (Azure Scheduler, or a Power Automate recurrence)
+call the `workflow_dispatch` API instead.
 
 ## Results
 

@@ -3,17 +3,30 @@ name: Website Homepage Audit
 on:
   workflow_dispatch:
   schedule:
-    # GitHub cron is always UTC. The Philippines is UTC+8, so subtract 8 hours
-    # from the local time you want:
-    #   10:00 PHT = 02:00 UTC  <- current setting
-    #   08:00 PHT = 00:00 UTC   |   12:00 PHT = 04:00 UTC
+    # TARGET: the report should land around 10:00 Philippine time (UTC+8).
     #
-    # The minute is deliberately not :00. GitHub queues scheduled jobs and the
-    # top of the hour is the most contended slot - this repo's runs on
-    # '0 0 * * *' consistently started ~4 hours late. An off-peak minute
-    # reduces that. GitHub still makes no delivery-time guarantee, so if runs
-    # remain persistently late, shift this cron earlier to compensate.
-    - cron: '17 2 * * *'
+    # This cron is NOT 10:00 PHT converted to UTC. GitHub queues scheduled
+    # workflows and starts them late, and for this repository the delay has
+    # been large and consistent:
+    #
+    #   cron 00:00 UTC -> ran 03:58, 04:01, 04:04, 04:05 UTC  (~4h late)
+    #   cron 02:17 UTC -> ran 07:23 UTC = 15:23 PHT           (5h06m late)
+    #
+    # So the nominal time is set ~5 hours EARLIER than the wanted time to
+    # absorb that queue delay:
+    #
+    #   21:17 UTC nominal (= 05:17 PHT) + ~4-5h observed delay = ~09:15-10:30 PHT
+    #
+    # Note this fires on the PREVIOUS UTC day, which is fine for a daily run.
+    # The minute stays off :00, the most contended slot in the queue.
+    #
+    # GitHub guarantees no start time, so this is compensation, not precision.
+    # If the delay shrinks, the report arrives early (down to 05:17 PHT); if it
+    # grows, later. Re-measure with:
+    #   gh run list --workflow=health-check.yml --json event,createdAt
+    # and shift the hour accordingly. For a genuinely punctual 10:00, trigger
+    # workflow_dispatch from an external scheduler instead of using cron.
+    - cron: '17 21 * * *'
 
 permissions:
   contents: read
