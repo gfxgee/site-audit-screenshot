@@ -40,6 +40,9 @@ Results are classified as:
 ### REVIEW
 
 - a meaningful broken image, or a failed first-party script/stylesheet/image
+- **a failed content request from a media host** (Lottie, Vimeo, YouTube, a CDN)
+- **three or more media containers rendered with no height** — an animation,
+  video or embed that never showed up
 - an unusually long redirect chain (more than 3 hops)
 - major horizontal overflow, or a suspiciously collapsed layout
 - the screenshot could not be captured
@@ -55,8 +58,19 @@ do **not** change the status:
 | JavaScript errors | Near-universal on real marketing sites and poorly correlated with what a visitor sees. `infosoft.no` throws `jQuery is not defined` and renders perfectly. |
 | Console errors | Same, plus browser privacy and policy noise. |
 | Failed font requests | A font that fails falls back to a system font. `marstrand.no` references nine Segoe UI files its theme never shipped; the page looks fine. |
-| Failed `fetch`/`xhr` | Background calls with no rendered output. |
-| Any third-party failure | Analytics, ads, consent tooling, embedded widgets, telemetry, favicons. |
+| Failed `fetch`/`xhr` | Background calls with no rendered output — **unless served by a content host**, see below. |
+| Third-party telemetry | Analytics, ads, consent tooling, telemetry, favicons. |
+
+**"Third-party" is not the same as "does not matter."** digitalfeet.com loads its
+hero animation from `lottie.host`; when that started returning `403` the
+animation disappeared and left a hole in the page, but the request was ignored
+twice over — once for being third-party, once for being an `xhr`. The site was
+reported `PASS` while visibly broken.
+
+Failures from hosts in `CONTENT_HOST_PATTERNS` (Lottie, Vimeo, YouTube,
+Cloudinary, imgix, jsDelivr, unpkg, cdnjs, Elfsight) therefore count regardless
+of party or resource type. Telemetry hosts are still ignored on every resource
+type. Add hosts to that list in [`src/classifier.js`](src/classifier.js).
 
 Together these accounted for **every** flag across a 13-site run of healthy
 sites: 9 REVIEW alerts, none of which a visitor would have noticed. The
@@ -85,6 +99,16 @@ in [`src/classifier.js`](src/classifier.js)):
 A score of 5 or more, an invisible body, or almost no text *and* almost no
 elements is `BROKEN`. A score of exactly 4 is `REVIEW`. A deliberately minimal
 landing page scores 2 and stays `PASS`.
+
+### Collapsed media containers
+
+An animation or embed whose asset never arrives often reports no error at all —
+the player simply never initialises and its container renders at zero height.
+The audit counts visible `lottie-player`, `dotlottie-player`, `.e-lottie__animation`,
+`video` and YouTube/Vimeo `iframe` elements whose height is under 3px.
+
+Three or more is `REVIEW`. Measured across the 13 monitored homepages, healthy
+sites sit at 0–2 and the broken one at 8, so the threshold separates cleanly.
 
 Ambiguous partial failures are intentionally `REVIEW`, not `BROKEN`.
 

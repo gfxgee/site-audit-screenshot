@@ -131,3 +131,50 @@ test('every real monitored homepage scores healthy', () => {
     assert.equal(thin, false);
   }
 });
+
+// --- content assets vs telemetry -----------------------------------------
+
+test('a third-party CONTENT host failure counts, even over xhr', () => {
+  // digitalfeet.com's hero animation: lottie.host returned 403 and the
+  // animation vanished. Previously ignored twice: third-party, and xhr.
+  const classification = classify(result({
+    failedRequests: [{
+      url: 'https://lottie.host/ab76a5d4-c73f-473c-9288-58cff8d691f3/YBTvWaUbK8.json',
+      status: 403, failure: '', resourceType: 'xhr',
+    }],
+  }));
+  assert.equal(classification.status, 'REVIEW');
+  assert.match(classification.issues[0], /failed content request/);
+  assert.match(classification.issues[0], /lottie\.host/);
+});
+
+test('telemetry over the same resource type is still ignored', () => {
+  const classification = classify(result({
+    failedRequests: [
+      { url: 'https://www.google-analytics.com/g/collect?v=2', status: 0, failure: 'blocked', resourceType: 'fetch' },
+      { url: 'https://px.ads.linkedin.com/wa/?medium=fetch', status: 0, failure: 'blocked', resourceType: 'fetch' },
+    ],
+  }));
+  assert.equal(classification.status, 'PASS');
+});
+
+test('first-party font failures remain ignored after the content-host change', () => {
+  const classification = classify(result({
+    failedRequests: [{
+      url: 'https://example.com/wp-content/uploads/avia_fonts/segoeui-bold.ttf',
+      status: 0, failure: 'net::ERR_FAILED', resourceType: 'font',
+    }],
+  }));
+  assert.equal(classification.status, 'PASS');
+});
+
+test('collapsed media containers review, with a threshold that spares healthy sites', () => {
+  // Observed across 13 real homepages: healthy sites sit at 0-2, the broken
+  // one at 8.
+  assert.equal(classify(result({ collapsedMedia: 0 })).status, 'PASS');
+  assert.equal(classify(result({ collapsedMedia: 2 })).status, 'PASS');
+
+  const flagged = classify(result({ collapsedMedia: 8 }));
+  assert.equal(flagged.status, 'REVIEW');
+  assert.match(flagged.issues[0], /8 media containers rendered with no height/);
+});

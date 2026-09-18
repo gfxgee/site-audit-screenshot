@@ -1,6 +1,9 @@
 // A homepage normally needs at most a couple of hops (http->https->www).
 const MAX_REASONABLE_REDIRECTS = 3;
 
+// How many zero-height media containers before the page is worth a look.
+const COLLAPSED_MEDIA_LIMIT = 3;
+
 const IGNORED_URL_PATTERNS = [
   /google-analytics\.com/i,
   /analytics\.google\.com/i,
@@ -68,6 +71,42 @@ export function isMeaningfulConsole(entry) {
  * fine. fetch/xhr are background calls with no rendered output. Flagging
  * these produced nine REVIEW alerts across thirteen healthy sites.
  */
+/**
+ * Third parties that serve page CONTENT, not telemetry.
+ *
+ * "Third-party" is not the same as "does not matter". digitalfeet.com loads its
+ * hero animation from lottie.host; when that returned 403 the animation vanished
+ * and left a hole in the page, but the request was ignored twice over -- once for
+ * being third-party, once for being an xhr. A visitor sees these failures, so
+ * they count regardless of who hosts them.
+ */
+const CONTENT_HOST_PATTERNS = [
+  /(^|\.)lottie\.host$/i,
+  /(^|\.)lottiefiles\.com$/i,
+  /(^|\.)assets\d*\.lottiefiles\.com$/i,
+  /(^|\.)player\.vimeo\.com$/i,
+  /(^|\.)vimeocdn\.com$/i,
+  /(^|\.)youtube\.com$/i,
+  /(^|\.)youtube-nocookie\.com$/i,
+  /(^|\.)ytimg\.com$/i,
+  /(^|\.)cloudinary\.com$/i,
+  /(^|\.)imgix\.net$/i,
+  /(^|\.)apps\.elfsight\.com$/i,
+  /(^|\.)unpkg\.com$/i,
+  /(^|\.)jsdelivr\.net$/i,
+  /(^|\.)cdnjs\.cloudflare\.com$/i,
+];
+
+/** True when a URL is hosted by a known content provider. */
+export function isContentHost(url) {
+  try {
+    const { hostname } = new URL(url);
+    return CONTENT_HOST_PATTERNS.some((pattern) => pattern.test(hostname));
+  } catch {
+    return false;
+  }
+}
+
 const NON_RENDERING_RESOURCE_TYPES = new Set([
   'font', 'fetch', 'xhr', 'ping', 'beacon', 'csp_report',
   'websocket', 'eventsource', 'manifest', 'texttrack', 'other',
@@ -110,9 +149,16 @@ export function scoreBlankPage(metrics) {
 function meaningfulFailedRequests(result) {
   const pageUrl = result.finalUrl || result.url;
   return result.failedRequests.filter((failure) => {
+    // Analytics, ads, consent and telemetry never count, whoever hosts them.
     if (isIgnoredUrl(failure.url)) return false;
-    if (!isFirstParty(failure.url, pageUrl)) return false;
-    if (NON_RENDERING_RESOURCE_TYPES.has(failure.resourceType)) return false;
+
+    // Content from a known media/asset host counts even though it is
+    // third-party and even when it arrives over fetch/xhr, because its
+    // absence leaves a visible hole in the page.
+    if (!isContentHost(failure.url)) {
+      if (!isFirstParty(failure.url, pageUrl)) return false;
+      if (NON_RENDERING_RESOURCE_TYPES.has(failure.resourceType)) return false;
+    }
     if (failure.resourceType === 'image' && result.brokenImages.some((image) => image.src === failure.url)) return false;
     if (failure.resourceType === 'media' && /ERR_ABORTED/i.test(failure.failure)) return false;
     return failure.status >= 400 || Boolean(failure.failure);
@@ -152,7 +198,17 @@ export function classify(result) {
 
   const failedRequests = meaningfulFailedRequests(result);
   if (failedRequests.length > 0) {
-    reviewIssues.push(`${failedRequests.length} failed first-party request${failedRequests.length === 1 ? '' : 's'}`);
+    const worst = failedRequests[0];
+    reviewIssues.push(
+      `${failedRequests.length} failed content request${failedRequests.length === 1 ? '' : 's'}`
+      + ` (e.g. ${worst.resourceType} ${worst.status || worst.failure} ${worst.url})`,
+    );
+  }
+
+  // Containers that should hold media but rendered at zero height: the
+  // animation/video/embed is missing even when nothing reported an error.
+  if ((result.collapsedMedia ?? 0) >= COLLAPSED_MEDIA_LIMIT) {
+    reviewIssues.push(`${result.collapsedMedia} media containers rendered with no height (animation or embed not showing)`);
   }
 
   // JavaScript and console errors are recorded in the report and shown in the
@@ -173,4 +229,4 @@ export function classify(result) {
   return { status: 'PASS', issues: [] };
 }
 
-export const classifierInternals = { IGNORED_URL_PATTERNS, IGNORED_ERROR_PATTERNS, NON_RENDERING_RESOURCE_TYPES, MAX_REASONABLE_REDIRECTS };
+export const classifierInternals = { IGNORED_URL_PATTERNS, IGNORED_ERROR_PATTERNS, NON_RENDERING_RESOURCE_TYPES, MAX_REASONABLE_REDIRECTS, CONTENT_HOST_PATTERNS, COLLAPSED_MEDIA_LIMIT };

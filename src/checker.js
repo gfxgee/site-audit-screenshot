@@ -109,6 +109,22 @@ async function inspectPage(page, config) {
     }
     const inspectionTruncated = candidates.length > examineLimit;
 
+    // Containers meant to hold media that rendered with no height. A Lottie
+    // animation, video or embed whose asset never arrives collapses like this
+    // and leaves a hole where the designer put content -- there is no network
+    // error to see when the player simply never initialises.
+    const mediaSelector = [
+      'lottie-player', 'dotlottie-player', '.e-lottie__animation', '[data-lottie]',
+      'video', 'iframe[src*="youtube"]', 'iframe[src*="vimeo"]',
+      '.elementor-widget-video', '.wp-block-embed__wrapper',
+    ].join(', ');
+    let collapsedMedia = 0;
+    for (const element of document.querySelectorAll(mediaSelector)) {
+      const style = window.getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden') continue; // deliberately hidden
+      if (element.getBoundingClientRect().height < 3) collapsedMedia += 1;
+    }
+
     const height = Math.max(body?.scrollHeight ?? 0, root.scrollHeight);
     const bodyVisible = Boolean(body && isVisible(body));
     const suspiciousCollapsed = bodyVisible && height < 250 && visibleText.length < 120 && meaningfulElements.length < 3;
@@ -126,6 +142,7 @@ async function inspectPage(page, config) {
       inspectionTruncated,
       innerHeight: window.innerHeight,
       majorContainerCount,
+      collapsedMedia,
       brokenImages,
       layout: {
         overflowPixels,
@@ -190,6 +207,7 @@ function baseResult(url, screenshotPath, projectRoot) {
     emailImagePath: null,
     emailImageError: null,
     lazyScrollError: null,
+    collapsedMedia: 0,
     blankPageDetected: false,
     thinPageDetected: false,
     blankSignals: [],
@@ -286,6 +304,7 @@ export async function checkSite(browser, url, screenshotPath, config) {
       result.brokenImages = inspection.brokenImages.slice(0, config.maxFailedRequests);
       result.horizontalOverflow = inspection.layout.horizontalOverflow;
       result.layout = inspection.layout;
+      result.collapsedMedia = inspection.collapsedMedia;
       result.pageMetrics = {
         title: inspection.title,
         visibleTextLength: inspection.visibleTextLength,
